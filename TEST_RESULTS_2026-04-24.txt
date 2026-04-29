@@ -1,0 +1,10 @@
+test_embedding_fail_fast_blocks_silent_fallback (test_guardrails.GuardrailTests.test_embedding_fail_fast_blocks_silent_fallback) ... ok
+test_json_vector_backend_and_answer_generator_work_offline (test_guardrails.GuardrailTests.test_json_vector_backend_and_answer_generator_work_offline) ... ok
+test_lightweight_edges_are_written_after_second_related_node (test_guardrails.GuardrailTests.test_lightweight_edges_are_written_after_second_related_node) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 2.590s
+
+OK
+
+Summary: success=True tests=3 failures=0 errors=0
