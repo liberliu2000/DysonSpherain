@@ -71,6 +71,8 @@ DysonSpherain is not just a vector search wrapper. It is a local memory layer bu
 
 ### Option A — use the npm wrapper
 
+The published npm package is scoped as `@liberliu/dysonspherain-memory`.
+
 ```bash
 npx @liberliu/dysonspherain-memory install --project .
 npx @liberliu/dysonspherain-memory doctor --project .
@@ -219,6 +221,8 @@ Install common integrations:
 
 ```bash
 npx @liberliu/dysonspherain-memory install --project .
+npm install -g @liberliu/dysonspherain-memory
+dyson-memory install --project .
 ```
 
 Install plugin manifests only:
