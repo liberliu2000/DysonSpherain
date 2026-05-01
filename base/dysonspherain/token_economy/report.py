@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .metrics import TokenEconomySample, detect_token_economy_failures, summarize_samples
+from .final_report import write_final_report
 
 
 MODE_COMPARISON_FIELDS = [
@@ -204,4 +205,34 @@ def write_report(
     _write_csv(output_dir / f"{prefix}mode_comparison.csv", MODE_COMPARISON_FIELDS, _mode_rows(samples))
     _write_csv(output_dir / f"{prefix}token_quality_tradeoff.csv", TRADEOFF_FIELDS, _tradeoff_rows(samples))
     (output_dir / f"{prefix}summary.md").write_text(_summary_markdown(summary, failure_cases), encoding="utf-8")
+    if not prefix:
+        manifest = {
+            "status": "ok",
+            "artifact_version": "token-economy-report-v2",
+            "sample_count": len(samples),
+            "files": {
+                "per_sample": "per_sample.jsonl",
+                "summary": "summary.json",
+                "summary_md": "summary.md",
+                "mode_comparison": "mode_comparison.csv",
+                "token_quality_tradeoff": "token_quality_tradeoff.csv",
+                "failure_cases": "failure_cases.json",
+                "tokenizer_calibration": "tokenizer_calibration.json",
+                "ledger_summary": "ledger_summary.json",
+                "final_report": "final_report.md",
+            },
+        }
+        _write_json(output_dir / "manifest.json", manifest)
+        _write_json(output_dir / "tokenizer_calibration.json", {"status": "not_run", "reason": "no calibration input supplied"})
+        _write_json(
+            output_dir / "ledger_summary.json",
+            {
+                "status": "ok",
+                "decision_distribution": summary.get("decision_distribution", {}),
+                "adapter_distribution": summary.get("adapter_distribution", {}),
+                "llm_prompt_token_economy": summary.get("llm_prompt_token_economy", {}),
+                "local_compute_economy": summary.get("local_compute_economy", {}),
+            },
+        )
+        write_final_report(output_dir)
     return summary

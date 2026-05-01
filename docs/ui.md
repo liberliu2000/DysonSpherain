@@ -31,9 +31,17 @@ Core product API endpoints:
 - `GET /api/health`
 - `GET /api/settings`
 - `PATCH /api/settings`
+- `GET /api/token-economy`
 
 The existing cockpit UI remains available at `/` and continues to show runtime
 ledger, graph, scheduler, token economy, and configuration views.
+
+The Next.js console under `web/` focuses on token economy and memory editing.
+It shows recent saved-token windows, a saved-token trend chart, the calculation
+formula, editable memory records, recall controls, decision/fallback/over-budget
+observability, high-risk file-reference cases, quality-guard violations, and a
+separate split for LLM prompt token saving vs local compute saving. Empty or
+missing artifact data should render as an empty state rather than crashing.
 
 Evidence Cockpit pages now include:
 

@@ -52,6 +52,35 @@ def _build_samples(
     return samples
 
 
+def _write_benchmark_ledger_events(samples: list[Any], artifact_dir: Path) -> Path:
+    from dysonspherain.token_economy.ledger import build_token_economy_event
+
+    path = artifact_dir / "token_economy_ledger_events.jsonl"
+    rows = []
+    for sample in samples:
+        rows.append(
+            build_token_economy_event(
+                project="DysonSpherain",
+                query=str(getattr(sample, "query", "")),
+                decision=str(getattr(sample, "extra", {}).get("decision") or "inject"),
+                adapter="benchmark",
+                task_type="benchmark",
+                mode=str(getattr(sample, "mode", "unknown")),
+                baseline_type=str(getattr(sample, "baseline_type", "unknown")),
+                baseline_context_tokens=int(getattr(sample, "raw_history_tokens", 0) or 0),
+                candidate_context_tokens=int(getattr(sample, "retrieved_context_tokens", 0) or 0),
+                final_injected_tokens=int(getattr(sample, "final_prompt_tokens", 0) or 0),
+                estimated_saved_tokens=int(getattr(sample, "saved_tokens_abs", 0) or 0),
+                fallback_tokenizer_used=bool(getattr(sample, "fallback_tokenizer_used", False)),
+                tokenizer_name=str(getattr(sample, "tokenizer_name", "")),
+                quality_guard_status=str(getattr(sample, "extra", {}).get("quality_guard_status") or "ok"),
+                local_compute_economy=dict(getattr(sample, "extra", {}).get("local_compute_economy") or {}),
+            ).to_dict()
+        )
+    path.write_text("\n".join(json.dumps(row, ensure_ascii=False, sort_keys=True) for row in rows) + ("\n" if rows else ""), encoding="utf-8")
+    return path
+
+
 def record_token_economy_for_metrics(
     *,
     metrics_path: Path,
@@ -90,6 +119,7 @@ def record_token_economy_for_metrics(
         evidence_bloat_threshold=evidence_bloat_threshold,
         metadata_bloat_threshold=metadata_bloat_threshold,
     )
+    ledger_path = _write_benchmark_ledger_events(samples, artifact_dir)
     result = {
         "artifact_dir": str(artifact_dir),
         "metrics_path": str(metrics_path),
@@ -101,6 +131,7 @@ def record_token_economy_for_metrics(
             "mode_comparison": str(artifact_dir / "token_economy_mode_comparison.csv"),
             "token_quality_tradeoff": str(artifact_dir / "token_economy_token_quality_tradeoff.csv"),
             "failure_cases": str(artifact_dir / "token_economy_failure_cases.json"),
+            "ledger_events": str(ledger_path),
         },
         "diagnostic_only": True,
         "thresholds": {
@@ -180,6 +211,7 @@ def record_token_economy_for_manifest(
             evidence_bloat_threshold=evidence_bloat_threshold,
             metadata_bloat_threshold=metadata_bloat_threshold,
         )
+        ledger_path = _write_benchmark_ledger_events(bench_samples, bench_dir)
         benchmark_reports[bench] = {
             "artifact_dir": str(bench_dir),
             "metrics_path": payload.get("metrics_path"),
@@ -191,6 +223,7 @@ def record_token_economy_for_manifest(
                 "mode_comparison": str(bench_dir / "token_economy_mode_comparison.csv"),
                 "token_quality_tradeoff": str(bench_dir / "token_economy_token_quality_tradeoff.csv"),
                 "failure_cases": str(bench_dir / "token_economy_failure_cases.json"),
+                "ledger_events": str(ledger_path),
             },
             "diagnostic_only": True,
             "thresholds": {
@@ -218,9 +251,11 @@ def record_token_economy_for_manifest(
         evidence_bloat_threshold=evidence_bloat_threshold,
         metadata_bloat_threshold=metadata_bloat_threshold,
     )
+    ledger_path = _write_benchmark_ledger_events(samples, te_dir)
     return {
         "artifact_dir": str(te_dir),
         "summary": summary,
+        "ledger_events": str(ledger_path),
         "benchmarks": benchmark_reports,
         "diagnostic_only": True,
         "thresholds": {

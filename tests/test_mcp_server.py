@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dysonspherain.adapters.mcp_server import TOOLS, TOOL_SCHEMAS, call_tool, handle_jsonrpc_request, mcp_sdk_available, smoke_payload
+from dysonspherain.memory_os.observation_store import token_economy_summary
 
 
 class McpServerTests(unittest.TestCase):
@@ -41,6 +42,30 @@ class McpServerTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertIn(result["decision"], {"inject", "skip", "inject_summary_only", "return_file_refs_only"})
 
+    def test_token_economy_eval_can_write_ledger_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"DYSON_ALLOWED_PATHS": tmp}):
+                result = call_tool(
+                    "dyson_token_economy_eval",
+                    {
+                        "cwd": tmp,
+                        "project": "DysonSpherain",
+                        "session_id": "mcp-ledger",
+                        "query": "repair token economy ledger writeback",
+                        "candidate_context": "ledger writeback evidence and file references",
+                        "baseline_context_tokens": 1200,
+                        "token_budget": 600,
+                        "write_ledger": True,
+                    },
+                )
+                summary = token_economy_summary(Path(tmp), project="DysonSpherain")
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("ledger_write", result)
+        self.assertEqual(result["ledger_write"]["status"], "ok")
+        self.assertEqual(summary["status"], "ok")
+        self.assertEqual(len(summary["events"]), 1)
+        self.assertEqual(summary["events"][0]["adapter"], "codex_mcp")
+
     def test_tools_list_exposes_input_schemas(self) -> None:
         self.assertEqual(set(TOOL_SCHEMAS), set(TOOLS))
         self.assertIn("prompt", TOOL_SCHEMAS["dyson_memory_intent"]["properties"])
@@ -50,6 +75,8 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("ranked_items", TOOL_SCHEMAS["dyson_context_pack"]["properties"])
         self.assertIn("memory_objects", TOOL_SCHEMAS["dyson_context_pack"]["properties"])
         self.assertIn("candidate_context", TOOL_SCHEMAS["dyson_token_economy_eval"]["properties"])
+        self.assertIn("cwd", TOOL_SCHEMAS["dyson_token_economy_eval"]["properties"])
+        self.assertIn("write_ledger", TOOL_SCHEMAS["dyson_token_economy_eval"]["properties"])
         self.assertIn("query", TOOL_SCHEMAS["dyson_search_memory"]["properties"])
         self.assertIn("observation_id", TOOL_SCHEMAS["dyson_timeline"]["properties"])
         self.assertIn("observation_ids", TOOL_SCHEMAS["dyson_get_observations"]["properties"])

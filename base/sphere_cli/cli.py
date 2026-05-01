@@ -1977,13 +1977,36 @@ def dyson_evaluate_token_economy_command(
     context_token_budget: str = typer.Option("1600", "--context-token-budget"),
     max_samples: int = typer.Option(0, "--max-samples"),
     tokenizer_model: str = typer.Option("cl100k_base", "--tokenizer-model"),
+    tokenizer_strategy: str = typer.Option("auto", "--tokenizer-strategy"),
+    tokenizer_calibration: Optional[Path] = typer.Option(None, "--tokenizer-calibration"),
     recent_k: int = typer.Option(20, "--recent-k"),
     allow_evidence_truncation: bool = typer.Option(False, "--allow-evidence-truncation", help="Allow truncating payload evidence when no live memory DB is provided"),
     smoke: bool = typer.Option(False, "--smoke"),
 ) -> None:
     from dysonspherain.evaluation.token_economy import main as token_economy_main
 
-    argv = ["--output", str(output), "--modes", modes, "--baseline-types", baseline_types, "--context-token-budget", context_token_budget, "--max-samples", str(max_samples), "--tokenizer-model", tokenizer_model, "--recent-k", str(recent_k), "--project", project]
+    argv = [
+        "--output",
+        str(output),
+        "--modes",
+        modes,
+        "--baseline-types",
+        baseline_types,
+        "--context-token-budget",
+        context_token_budget,
+        "--max-samples",
+        str(max_samples),
+        "--tokenizer-model",
+        tokenizer_model,
+        "--tokenizer-strategy",
+        tokenizer_strategy,
+        "--recent-k",
+        str(recent_k),
+        "--project",
+        project,
+    ]
+    if tokenizer_calibration:
+        argv.extend(["--tokenizer-calibration", str(tokenizer_calibration)])
     if input:
         argv.extend(["--input", str(input)])
     if benchmark_artifact_root:
@@ -1995,6 +2018,41 @@ def dyson_evaluate_token_economy_command(
     if smoke:
         argv.append("--smoke")
     token_economy_main(argv)
+
+
+@app.command("evaluate-token-economy-smoke")
+def dyson_evaluate_token_economy_smoke_command(
+    samples: int = typer.Option(20, "--samples", min=1),
+    output: Path = typer.Option(Path("artifacts/token_economy_smoke"), "--output"),
+) -> None:
+    from dysonspherain.evaluation.token_economy import main as token_economy_main
+
+    token_economy_main(
+        [
+            "--smoke",
+            "--output",
+            str(output),
+            "--max-samples",
+            str(samples),
+            "--modes",
+            "off,conservative,exploratory,minimal",
+            "--baseline-types",
+            "full_history,naive_recent,manual_summary",
+            "--context-token-budget",
+            "800,1200,1600,2400",
+        ]
+    )
+
+
+@app.command("calibrate-tokenizer")
+def dyson_calibrate_tokenizer_command(
+    input: Path = typer.Option(..., "--input", help="JSONL calibration samples"),
+    output: Path = typer.Option(Path("artifacts/tokenizer_calibration.json"), "--output"),
+    strategy: str = typer.Option("mixed_content_heuristic", "--strategy"),
+) -> None:
+    from dysonspherain.token_economy.tokenizer_calibration import calibrate
+
+    console.print_json(json.dumps(calibrate(input, output, strategy=strategy), ensure_ascii=False, indent=2, sort_keys=True))
 
 
 @app.command("token-economy-final-report")

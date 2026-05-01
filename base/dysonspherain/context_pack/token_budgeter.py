@@ -20,6 +20,58 @@ DEFAULT_BUDGETS = {
 }
 
 
+@dataclass(frozen=True)
+class BudgetPolicy:
+    total_budget: int
+    core_evidence_ratio: float = 0.42
+    file_refs_ratio: float = 0.08
+    prior_decisions_ratio: float = 0.12
+    known_failures_ratio: float = 0.12
+    benchmark_state_ratio: float = 0.10
+    actions_ratio: float = 0.06
+    warnings_ratio: float = 0.04
+    reserve_ratio: float = 0.06
+
+    def __post_init__(self) -> None:
+        if self.ratio_sum > 1.000001:
+            raise ValueError(f"BudgetPolicy ratios exceed 1.0: {self.ratio_sum:.4f}")
+
+    @property
+    def ratio_sum(self) -> float:
+        return round(
+            self.core_evidence_ratio
+            + self.file_refs_ratio
+            + self.prior_decisions_ratio
+            + self.known_failures_ratio
+            + self.benchmark_state_ratio
+            + self.actions_ratio
+            + self.warnings_ratio
+            + self.reserve_ratio,
+            6,
+        )
+
+    def allocate(self) -> dict[str, int]:
+        return {
+            "core_evidence": int(self.total_budget * self.core_evidence_ratio),
+            "relevant_files": int(self.total_budget * self.file_refs_ratio),
+            "prior_decisions": int(self.total_budget * self.prior_decisions_ratio),
+            "known_failures": int(self.total_budget * self.known_failures_ratio),
+            "benchmark_state": int(self.total_budget * self.benchmark_state_ratio),
+            "recommended_next_actions": int(self.total_budget * self.actions_ratio),
+            "warnings": int(self.total_budget * self.warnings_ratio),
+            "reserve": max(0, self.total_budget - int(self.total_budget * (self.ratio_sum - self.reserve_ratio))),
+        }
+
+
+def budget_policy_for(task_type: str, total_budget: int) -> BudgetPolicy:
+    normalized = str(task_type or "unknown").lower()
+    if normalized in {"benchmark", "debug"}:
+        return BudgetPolicy(total_budget=total_budget, core_evidence_ratio=0.36, known_failures_ratio=0.16, benchmark_state_ratio=0.14, prior_decisions_ratio=0.10)
+    if normalized == "paper":
+        return BudgetPolicy(total_budget=total_budget, core_evidence_ratio=0.34, prior_decisions_ratio=0.16, benchmark_state_ratio=0.14, actions_ratio=0.04)
+    return BudgetPolicy(total_budget=total_budget)
+
+
 @dataclass
 class BudgetResult:
     pack: ContextPack
@@ -29,6 +81,7 @@ class BudgetResult:
     dropped_items: list[str] = field(default_factory=list)
     kept_items: list[str] = field(default_factory=list)
     over_budget: bool = False
+    manifest: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -38,6 +91,7 @@ class BudgetResult:
             "dropped_items": list(self.dropped_items),
             "kept_items": list(self.kept_items),
             "over_budget": self.over_budget,
+            "manifest": dict(self.manifest),
         }
 
 
@@ -148,14 +202,15 @@ def _drop_one_lowest(pack: ContextPack, section: str, dropped: list[str]) -> boo
     return True
 
 
-def fit_context_pack(pack: ContextPack, token_budget: int, counter: TokenCounter | None = None) -> BudgetResult:
+def fit_context_pack(pack: ContextPack, token_budget: int, counter: TokenCounter | None = None, policy: BudgetPolicy | None = None) -> BudgetResult:
     counter = counter or TokenCounter()
+    policy = policy or BudgetPolicy(total_budget=token_budget)
     dropped: list[str] = []
     kept: list[str] = []
     _precompress_pack(pack, dropped)
     before = counter.count(render_markdown(pack)).tokens
     if before <= token_budget:
-        return BudgetResult(pack, before, before, 1.0, dropped, ["all"], False)
+        return BudgetResult(pack, before, before, 1.0, dropped, ["all"], False, {"policy": policy.allocate(), "actual_tokens": {"all": before}, "dropped_count": len(dropped)})
 
     # Drop expendable sections before touching protected benchmark/failure/file-ref evidence.
     drop_order = (
@@ -211,4 +266,5 @@ def fit_context_pack(pack: ContextPack, token_budget: int, counter: TokenCounter
         dropped_items=dropped,
         kept_items=kept,
         over_budget=after > token_budget,
+        manifest={"policy": policy.allocate(), "actual_tokens": {"total": after}, "dropped_count": len(dropped)},
     )

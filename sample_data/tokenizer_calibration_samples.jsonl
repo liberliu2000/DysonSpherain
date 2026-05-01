@@ -1,0 +1,7 @@
+{"kind":"zh_text","text":"项目记忆会压缩重复背景，并把可复用决策作为短上下文召回。","reference_tokens":29}
+{"kind":"prose","text":"DysonSpherain estimates prompt-token savings by comparing the original context budget with the final injected memory pack and retrieval overhead.","reference_tokens":24}
+{"kind":"code","text":"def saved_tokens(original: int, injected: int, overhead: int) -> int:\n    return max(0, original - injected - overhead)\n","reference_tokens":35}
+{"kind":"json","text":"{\"window\":\"24h\",\"estimated_saved_tokens\":412000,\"saving_ratio\":0.63,\"event_count\":14}","reference_tokens":31}
+{"kind":"markdown","text":"## Token Economy\n\n- Track one-hour, one-day, and seven-day saved-token windows.\n- Keep local compute savings separate from prompt-token savings.","reference_tokens":33}
+{"kind":"log","text":"2026-05-01T10:15:08Z token_economy decision=inject baseline=9200 final=2470 saved=6730 mode=conservative","reference_tokens":39}
+{"kind":"metrics","text":"recall_any@10=0.84 ndcg_any@10=0.71 candidate_recall@100=0.93 fallback_tokenizer_used=false","reference_tokens":35}

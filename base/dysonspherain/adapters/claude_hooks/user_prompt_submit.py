@@ -9,6 +9,7 @@ from dysonspherain.memory_os.memory_intent import classify_memory_intent
 from dysonspherain.memory_os.observation_store import resume_context, search_observations, write_token_economy_event
 from dysonspherain.memory_os.recall_service import RecallRequest, recall
 from dysonspherain.token_economy.evaluator import evaluate
+from dysonspherain.utils.token_counter import TokenCounter
 from .runtime_ledger import append_hook_event
 
 
@@ -66,7 +67,15 @@ def main() -> None:
     if not candidate_context.strip():
         print("{}")
         return
-    decision = evaluate(query=prompt, candidate_context=candidate_context, baseline_context_tokens=baseline_context_tokens, token_budget=int(intent.token_budget or 1600), task_type=task_type)
+    mode = "debug" if os.environ.get("DYSON_TOKEN_ECONOMY_DEBUG") == "1" else "conservative"
+    decision = evaluate(
+        query=prompt,
+        candidate_context=candidate_context,
+        baseline_context_tokens=baseline_context_tokens,
+        token_budget=int(intent.token_budget or 1600),
+        task_type=task_type,
+        mode=mode,
+    )
     final_decision = decision.decision
     if decision.decision == "skip" and intent.reason == "cross_session_continuation":
         final_decision = "inject"
@@ -78,28 +87,38 @@ def main() -> None:
         context = "\n".join(line for line in candidate_context.splitlines() if "base/" in line or ".py" in line or "dyson://observation/" in line) or candidate_context[:1200]
     elif final_decision == "inject_summary_only":
         context = candidate_context.split("\n\n", 1)[0]
-    compression_ratio = (decision.estimated_tokens / int(intent.token_budget or 1600)) if decision.estimated_tokens else 0.0
-    token_note = (
-        "\n\nToken economy: "
-        f"intent_reason={intent.reason}, "
-        f"decision={final_decision}, "
-        f"injected_tokens={decision.estimated_tokens}, "
-        f"estimated_saved_tokens={decision.estimated_saved_tokens}, "
-        f"budget_usage_ratio={compression_ratio:.4f}"
-    )
+    final_count = TokenCounter().count(context)
+    compression_ratio = (final_count.tokens / int(intent.token_budget or 1600)) if final_count.tokens else 0.0
     write_token_economy_event(
         Path(cwd).resolve(),
         project=project,
         session_id=str(payload.get("session_id") or ""),
         prompt=prompt,
         decision=final_decision,
-        injected_tokens=decision.estimated_tokens,
+        injected_tokens=final_count.tokens,
         baseline_context_tokens=baseline_context_tokens,
         estimated_saved_tokens=decision.estimated_saved_tokens,
         budget_usage_ratio=compression_ratio,
-        metadata={"task_type": task_type, "intent_reason": intent.reason, "recommended_tools": intent.recommended_tools},
+        adapter="claude_hook",
+        task_type=task_type,
+        mode=mode,
+        risk=decision.risk,
+        reason=decision.reason,
+        baseline_type="full_history",
+        candidate_context_tokens=decision.estimated_tokens,
+        final_injected_tokens=final_count.tokens,
+        duplicate_token_ratio=decision.duplication_score,
+        protected_evidence_tokens=0,
+        dropped_evidence_count=1 if final_decision in {"inject_summary_only", "return_file_refs_only"} else 0,
+        fallback_tokenizer_used=decision.fallback_tokenizer_used,
+        tokenizer_name=decision.tokenizer_name,
+        quality_guard_status=decision.quality_guard_status,
+        source_files=list(decision.source_files),
+        metadata={"intent_reason": intent.reason, "recommended_tools": intent.recommended_tools},
     )
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "DysonSpherain recalled context:\n" + context + token_note}, "dysonLedger": ledger_result}, ensure_ascii=False))
+    if os.environ.get("DYSON_INJECT_TOKEN_ECONOMY_NOTE") == "1" or os.environ.get("DYSON_TOKEN_ECONOMY_DEBUG") == "1":
+        context = context.rstrip() + f"\n\n[dyson: memory injected, {final_count.tokens} tokens, estimated saved {decision.estimated_saved_tokens}]"
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "DysonSpherain recalled context:\n" + context}, "dysonLedger": ledger_result}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

@@ -38,6 +38,7 @@ class DaemonApiTests(unittest.TestCase):
                 baseline_context_tokens=1000,
                 estimated_saved_tokens=900,
                 budget_usage_ratio=0.0625,
+                local_compute_economy={"embedding_cache_hit_count": 3, "embedding_cache_miss_count": 1, "estimated_local_runtime_saved_ms": 80},
             )
             append_event(
                 root,
@@ -88,6 +89,10 @@ class DaemonApiTests(unittest.TestCase):
                 token = json.loads(urlopen(base + "/api/token-economy", timeout=3).read().decode("utf-8"))
                 self.assertEqual(token["windows"]["24h"]["estimated_saved_tokens"], 900)
                 self.assertAlmostEqual(token["windows"]["24h"]["saving_ratio"], 0.9)
+                self.assertEqual(token["decision_distribution"]["inject"], 1)
+                self.assertEqual(token["fallback_tokenizer_rate"], 0.0)
+                self.assertIn("llm_prompt_token_economy", token)
+                self.assertAlmostEqual(token["local_compute_economy"]["embedding_cache_hit_rate"], 0.75)
                 resume = json.loads(urlopen(base + "/api/resume-context?session_id=s1", timeout=3).read().decode("utf-8"))
                 self.assertEqual(resume["status"], "ok")
                 self.assertIn("DysonSpherain Resume Context", resume["rendered_context"])

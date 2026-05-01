@@ -1,0 +1,22 @@
+\begin{tikzpicture}[
+  node distance=8mm and 12mm,
+  box/.style={draw, rounded corners=2pt, align=center, minimum width=31mm, minimum height=9mm, font=\small},
+  arrow/.style={-Latex, thick}
+]
+\node[box] (cli) {CLI};
+\node[box, right=of cli] (memory) {Memory OS\\Interface};
+\node[box, below=of cli] (harness) {Research Evaluation\\Harness};
+\node[box, below=of memory] (context) {Runtime Context\\Compiler};
+\node[box, right=of harness] (registry) {Experiment\\Registry};
+\node[box, right=of context] (retrieval) {Retrieval Pipeline\\and Diagnostics};
+\node[box, below=of retrieval] (validator) {Formal Protocol\\Validator};
+
+\draw[arrow] (cli) -- (memory);
+\draw[arrow] (cli) -- (harness);
+\draw[arrow] (memory) -- (context);
+\draw[arrow] (harness) -- (registry);
+\draw[arrow] (registry) -- (retrieval);
+\draw[arrow] (context) -- (retrieval);
+\draw[arrow] (retrieval) -- (validator);
+\draw[arrow] (validator.west) -- ++(-16mm,0) |- (registry.south);
+\end{tikzpicture}

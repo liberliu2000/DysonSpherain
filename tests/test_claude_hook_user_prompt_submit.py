@@ -42,10 +42,25 @@ class ClaudeHookUserPromptSubmitTests(unittest.TestCase):
             )
             payload = json.loads(proc.stdout)
             self.assertIn("additionalContext", payload["hookSpecificOutput"])
-            self.assertIn("estimated_saved_tokens", payload["hookSpecificOutput"]["additionalContext"])
+            self.assertNotIn("estimated_saved_tokens", payload["hookSpecificOutput"]["additionalContext"])
             summary = token_economy_summary(Path(tmp), project="DysonSpherain")
             self.assertGreaterEqual(len(summary["events"]), 1)
+            self.assertIn("estimated_saved_tokens", summary["events"][0])
             self.assertTrue(any(event.event_type == "user_instruction_received" for event in replay_events(Path(tmp))))
+
+    def test_debug_env_adds_short_token_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            write_memory(Path(tmp), memory_type="decision", project="DysonSpherain", content="Debug recall note for token economy.", source="test")
+            proc = subprocess.run(
+                [sys.executable, "-m", "dysonspherain.adapters.claude_hooks.user_prompt_submit"],
+                input=json.dumps({"prompt": "Please debug token economy regression using prior project memory.", "cwd": tmp}),
+                text=True,
+                capture_output=True,
+                env={"PYTHONPATH": str(ROOT), "DYSON_TOKEN_ECONOMY_DEBUG": "1"},
+                check=True,
+            )
+            context = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("[dyson: memory injected", context)
 
     def test_short_continuation_prompt_uses_resume_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -71,7 +86,7 @@ class ClaudeHookUserPromptSubmitTests(unittest.TestCase):
             context = payload["hookSpecificOutput"]["additionalContext"]
             self.assertIn("DysonSpherain Resume Context", context)
             self.assertIn("memory intent integration", context)
-            self.assertIn("intent_reason=cross_session_continuation", context)
+            self.assertNotIn("intent_reason=cross_session_continuation", context)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,5 @@
+\begin{tikzpicture}
+\begin{axis}[ybar,width=0.9\linewidth,height=5.6cm,ymin=0,ymax=1.05,ylabel={Admission R@100},symbolic x coords={longmemeval,locomo,knowme,clonemem},xtick=data,x tick label style={rotate=20,anchor=east},grid=major,grid style={draw=gray!20}]
+\addplot coordinates {(longmemeval,1.0000) (locomo,1.0000) (knowme,0.7266) (clonemem,0.3442)};
+\end{axis}
+\end{tikzpicture}

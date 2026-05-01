@@ -66,6 +66,7 @@ class TokenEconomySample:
 def summarize_samples(samples: list[TokenEconomySample]) -> dict[str, Any]:
     if not samples:
         return {
+            "num_samples": 0,
             "sample_count": 0,
             "fallback_tokenizer_used_count": 0,
             "modes": [],
@@ -73,26 +74,66 @@ def summarize_samples(samples: list[TokenEconomySample]) -> dict[str, Any]:
             "context_token_budgets": [],
             "by_mode": {},
             "failure_case_counts": {},
+            "llm_prompt_token_economy": {},
+            "local_compute_economy": {},
         }
     failure_cases = detect_token_economy_failures(samples)
     by_mode: dict[str, dict[str, Any]] = {}
     for key in sorted({item.mode for item in samples}):
         group = [item for item in samples if item.mode == key]
         by_mode[key] = _summary_group(group)
+    ratios = [item.saved_tokens_ratio for item in samples]
+    fallback_count = sum(1 for item in samples if item.fallback_tokenizer_used)
+    quality_guard_violations = sum(1 for item in samples if str(item.extra.get("quality_guard_status") or "") == "violation")
+    over_budget_count = sum(1 for item in samples if item.context_token_budget is not None and item.final_prompt_tokens > item.context_token_budget)
+    decision_distribution: dict[str, int] = {}
+    adapter_distribution: dict[str, int] = {}
+    for item in samples:
+        decision = str(item.extra.get("decision") or "unknown")
+        adapter = str(item.extra.get("adapter") or "evaluation")
+        decision_distribution[decision] = decision_distribution.get(decision, 0) + 1
+        adapter_distribution[adapter] = adapter_distribution.get(adapter, 0) + 1
+    raw_total = sum(item.raw_history_tokens for item in samples)
+    final_total = sum(item.final_prompt_tokens for item in samples)
+    saved_total = sum(item.saved_tokens_abs for item in samples)
+    local_compute = _local_compute_summary(samples)
     return {
+        "num_samples": len(samples),
         "sample_count": len(samples),
         "tokenizer_name": samples[0].tokenizer_name,
-        "fallback_tokenizer_used_count": sum(1 for item in samples if item.fallback_tokenizer_used),
+        "fallback_tokenizer_used_count": fallback_count,
         "modes": sorted({item.mode for item in samples}),
+        "baselines": sorted({item.baseline_type for item in samples}),
         "baseline_types": sorted({item.baseline_type for item in samples}),
         "context_token_budgets": sorted({item.context_token_budget for item in samples if item.context_token_budget is not None}),
+        "avg_saved_tokens_abs": sum(item.saved_tokens_abs for item in samples) / len(samples),
         "mean_saved_tokens_abs": sum(item.saved_tokens_abs for item in samples) / len(samples),
+        "avg_saved_tokens_ratio": sum(item.saved_tokens_ratio for item in samples) / len(samples),
         "mean_saved_tokens_ratio": sum(item.saved_tokens_ratio for item in samples) / len(samples),
+        "p50_saved_tokens_ratio": _percentile(ratios, 0.5),
+        "p90_saved_tokens_ratio": _percentile(ratios, 0.9),
+        "avg_final_prompt_tokens": sum(item.final_prompt_tokens for item in samples) / len(samples),
         "mean_final_prompt_tokens": sum(item.final_prompt_tokens for item in samples) / len(samples),
+        "avg_quality_drop": _mean([float(item.extra.get("quality_drop") or 0.0) for item in samples]),
+        "quality_guard_violation_rate": quality_guard_violations / len(samples),
+        "duplicate_token_ratio_avg": _mean([float(item.extra.get("duplicate_token_ratio") or 0.0) for item in samples]),
+        "fallback_tokenizer_rate": fallback_count / len(samples),
+        "over_budget_rate": over_budget_count / len(samples),
+        "decision_distribution": decision_distribution,
+        "adapter_distribution": adapter_distribution,
         "fallback_tokenizer_used": any(item.fallback_tokenizer_used for item in samples),
         "token_regression_count": sum(1 for item in samples if item.saved_tokens_abs < 0),
         "by_mode": by_mode,
         "failure_case_counts": {key: len(value) for key, value in failure_cases.items()},
+        "llm_prompt_token_economy": {
+            "baseline_context_tokens": raw_total,
+            "final_injected_tokens": final_total,
+            "estimated_saved_tokens": saved_total,
+            "saved_ratio": (saved_total / raw_total) if raw_total else 0.0,
+        },
+        "local_compute_economy": {
+            **local_compute,
+        },
     }
 
 
@@ -134,6 +175,36 @@ def _summary_group(samples: list[TokenEconomySample]) -> dict[str, Any]:
         "avg_retrieved_evidence_count": _mean([float(item.retrieved_evidence_count) for item in samples]),
         "avg_candidate_count": _mean([float(item.candidate_count) for item in samples]),
         "avg_final_context_item_count": _mean([float(item.final_context_item_count) for item in samples]),
+    }
+
+
+def _local_compute_summary(samples: list[TokenEconomySample]) -> dict[str, Any]:
+    embedding_hits = 0.0
+    embedding_misses = 0.0
+    retrieval_hits = 0.0
+    retrieval_total = 0.0
+    profile_hits = 0.0
+    profile_total = 0.0
+    saved_ms = 0.0
+    for item in samples:
+        local = item.extra.get("local_compute_economy") if isinstance(item.extra, dict) else {}
+        if not isinstance(local, dict):
+            local = {}
+        embedding_hits += float(local.get("embedding_cache_hit_count") or local.get("embedding_cache_hits") or 0.0)
+        embedding_misses += float(local.get("embedding_cache_miss_count") or local.get("embedding_cache_misses") or 0.0)
+        saved_ms += float(local.get("estimated_local_runtime_saved_ms") or local.get("embedding_cache_hit_ms_saved") or 0.0)
+        if local.get("retrieval_cache_hit_rate") is not None:
+            retrieval_hits += float(local.get("retrieval_cache_hit_rate") or 0.0)
+            retrieval_total += 1.0
+        if local.get("profile_cache_hit_rate") is not None:
+            profile_hits += float(local.get("profile_cache_hit_rate") or 0.0)
+            profile_total += 1.0
+    embedding_total = embedding_hits + embedding_misses
+    return {
+        "embedding_cache_hit_rate": (embedding_hits / embedding_total) if embedding_total else 0.0,
+        "retrieval_cache_hit_rate": (retrieval_hits / retrieval_total) if retrieval_total else 0.0,
+        "profile_cache_hit_rate": (profile_hits / profile_total) if profile_total else 0.0,
+        "estimated_local_runtime_saved_ms": round(saved_ms, 2),
     }
 
 

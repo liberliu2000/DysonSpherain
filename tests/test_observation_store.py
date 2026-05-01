@@ -113,6 +113,13 @@ class ObservationStoreTests(unittest.TestCase):
                 baseline_context_tokens=1000,
                 estimated_saved_tokens=900,
                 budget_usage_ratio=0.0625,
+                local_compute_economy={
+                    "embedding_cache_hit_count": 8,
+                    "embedding_cache_miss_count": 2,
+                    "retrieval_cache_hit_rate": 0.75,
+                    "profile_cache_hit_rate": 0.5,
+                    "estimated_local_runtime_saved_ms": 120.5,
+                },
             )
             write_token_economy_event(
                 root,
@@ -132,6 +139,10 @@ class ObservationStoreTests(unittest.TestCase):
             self.assertAlmostEqual(summary["windows"]["24h"]["saving_ratio"], 0.9)
             self.assertEqual(summary["windows"]["30d"]["estimated_saved_tokens"], 900)
             self.assertEqual(len(summary["events"]), 2)
+            self.assertAlmostEqual(summary["local_compute_economy"]["embedding_cache_hit_rate"], 0.8)
+            self.assertAlmostEqual(summary["local_compute_economy"]["retrieval_cache_hit_rate"], 0.75)
+            self.assertAlmostEqual(summary["local_compute_economy"]["profile_cache_hit_rate"], 0.5)
+            self.assertEqual(summary["local_compute_economy"]["estimated_local_runtime_saved_ms"], 120.5)
 
     def test_resume_context_builds_continuation_packet_for_latest_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

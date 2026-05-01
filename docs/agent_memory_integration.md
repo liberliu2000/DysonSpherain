@@ -21,6 +21,16 @@ MCP path access is allowlisted. Tool calls can read/write only under `DYSON_PROJ
 
 `dyson_memory_intent` is the first-step routing decision: it returns `should_call_memory`, a reason such as `cross_session_continuation`, preferred tools, and a token budget. `dyson_recall` routes through the existing retrieval/context assembly path. `dyson_context_pack` can pack by query, explicit `memory_ids`, or supplied candidate records (`candidates`, `ranked_items`, `memory_objects`) and can render `markdown` or `json` with selected sections. `dyson_project_state` trims the returned state to the requested token budget.
 
+Before injecting candidate context into a long-running agent prompt, call
+`dyson_token_economy_eval`. Use its decision as the policy boundary:
+
+- `inject`: use the rendered context.
+- `inject_summary_only`: use summary plus file references.
+- `return_file_refs_only`: open referenced local files instead of injecting long prose.
+- `skip`: continue with local code reading and no memory injection.
+
+The evaluator records relevance, duplication, risk, protected evidence, fallback tokenizer state, and quality guard status. Full raw recall results should not be pasted into prompts.
+
 Progressive disclosure uses three tools:
 
 - `dyson_search_memory`: compact search results with stable observation IDs, snippets, citations, and token cost.
@@ -74,11 +84,13 @@ The root page serves a modern minimal dashboard. It shows:
 
 - a "Resume Last Session" continuation packet;
 - per-conversation token savings rows from `token_economy_event` observations;
-- total estimated saved tokens for the last 24 hours, 7 days, and 30 days;
+- total estimated saved tokens for the last 1 hour, 24 hours, 7 days, and 30 days;
 - aggregate saving ratio for each window, computed as `sum(saved_tokens) / sum(baseline_context_tokens)`;
+- decision distribution, fallback tokenizer rate, over-budget rate, duplicate-context cases, high-risk file-reference cases, and quality-guard violations when available;
+- LLM prompt token saving and local compute saving as separate summaries;
 - observation search and detail inspection.
 
-`UserPromptSubmit` records token economy events when recalled context is injected or summarized, so the dashboard reflects actual hook usage rather than only offline benchmark reports.
+`UserPromptSubmit` records token economy events when recalled context is injected or summarized, so the dashboard reflects actual hook usage rather than only offline benchmark reports. By default, token economy diagnostics are written to the ledger and are not injected into the model prompt. Set `DYSON_TOKEN_ECONOMY_DEBUG=1` or `DYSON_INJECT_TOKEN_ECONOMY_NOTE=1` to inject a short debug note.
 
 `SessionStart` injects project state plus `dyson_resume_context` when a previous session is available, allowing new windows to pick up recent goal, files changed, tests, failures, next actions, timeline, and token savings.
 

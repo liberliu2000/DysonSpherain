@@ -13,7 +13,7 @@ from dysonspherain.context_pack.builder import apply_sections, build_pack, build
 from dysonspherain.context_pack.renderers import render_context_pack
 from dysonspherain.context_pack.token_budgeter import fit_context_pack
 from dysonspherain.memory_os.memory_intent import classify_memory_intent
-from dysonspherain.memory_os.observation_store import get_observations, resume_context, search_observations, timeline
+from dysonspherain.memory_os.observation_store import get_observations, resume_context, search_observations, timeline, write_token_economy_event
 from dysonspherain.memory_os.project_state import ProjectStateRequest, get_project_state
 from dysonspherain.memory_os.recall_service import RecallRequest, recall
 from dysonspherain.memory_os.write_service import WriteMemoryRequest, write_memory
@@ -181,9 +181,17 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {
             "query": {"type": "string"},
             "candidate_context": {"type": "string"},
+            "existing_context": {"type": "string", "default": ""},
             "baseline_context_tokens": {"type": "integer", "default": 0},
             "token_budget": {"type": "integer", "default": 1600},
             "task_type": {"type": "string", "enum": ["coding", "benchmark", "paper", "debug", "planning", "unknown"]},
+            "mode": {"type": "string", "enum": ["off", "conservative", "exploratory", "debug", "benchmark", "minimal"], "default": "conservative"},
+            "source_files": {"type": "array", "items": {"type": "string"}},
+            "quality_signals": {"type": "object"},
+            "cwd": {"type": "string"},
+            "project": {"type": "string", "default": "DysonSpherain"},
+            "session_id": {"type": "string", "default": ""},
+            "write_ledger": {"type": "boolean", "default": False},
         },
         "required": ["query", "candidate_context"],
     },
@@ -538,13 +546,49 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             arguments = {**arguments, "cwd": str(_resolve_allowed_path(str(arguments.get("cwd"))))}
         return get_project_state(ProjectStateRequest(**{key: value for key, value in arguments.items() if key in ProjectStateRequest.__dataclass_fields__}))
     if name == "dyson_token_economy_eval":
-        return evaluate(
+        decision = evaluate(
             query=str(arguments.get("query") or ""),
             candidate_context=str(arguments.get("candidate_context") or ""),
+            existing_context=str(arguments.get("existing_context") or ""),
             baseline_context_tokens=int(arguments.get("baseline_context_tokens") or 0),
             token_budget=int(arguments.get("token_budget") or 1600),
             task_type=str(arguments.get("task_type") or "unknown"),
-        ).to_dict()
+            mode=str(arguments.get("mode") or "conservative"),
+            source_files=[str(item) for item in (arguments.get("source_files") or [])],
+            quality_signals=dict(arguments.get("quality_signals") or {}),
+        )
+        payload = decision.to_dict()
+        if arguments.get("write_ledger") or arguments.get("cwd"):
+            cwd = _resolve_allowed_path(str(arguments.get("cwd") or os.getcwd()))
+            final_tokens = decision.estimated_tokens if decision.decision == "inject" else 0
+            if decision.decision == "inject_summary_only":
+                final_tokens = min(decision.estimated_tokens, int(arguments.get("token_budget") or 1600))
+            write = write_token_economy_event(
+                cwd,
+                project=str(arguments.get("project") or "DysonSpherain"),
+                session_id=str(arguments.get("session_id") or ""),
+                prompt=str(arguments.get("query") or ""),
+                decision=decision.decision,
+                injected_tokens=final_tokens,
+                baseline_context_tokens=int(arguments.get("baseline_context_tokens") or 0),
+                estimated_saved_tokens=decision.estimated_saved_tokens,
+                budget_usage_ratio=(final_tokens / max(1, int(arguments.get("token_budget") or 1600))),
+                adapter="codex_mcp",
+                task_type=str(arguments.get("task_type") or "unknown"),
+                mode=str(arguments.get("mode") or "conservative"),
+                risk=decision.risk,
+                reason=decision.reason,
+                candidate_context_tokens=decision.estimated_tokens,
+                final_injected_tokens=final_tokens,
+                duplicate_token_ratio=decision.duplication_score,
+                fallback_tokenizer_used=decision.fallback_tokenizer_used,
+                tokenizer_name=decision.tokenizer_name,
+                quality_guard_status=decision.quality_guard_status,
+                source_files=list(decision.source_files),
+                metadata={"mcp_tool": "dyson_token_economy_eval"},
+            )
+            payload["ledger_write"] = {"status": write.get("status"), "observation_id": write.get("observation_id")}
+        return payload
     if name == "dyson_search_memory":
         cwd = _resolve_allowed_path(str(arguments.get("cwd") or os.getcwd()))
         return search_observations(
@@ -908,18 +952,30 @@ def _run_mcp_sdk_server() -> bool:
     def dyson_token_economy_eval_tool(
         query: str,
         candidate_context: str,
+        existing_context: str = "",
         baseline_context_tokens: int = 0,
         token_budget: int = 1600,
         task_type: str = "unknown",
+        mode: str = "conservative",
+        cwd: str | None = None,
+        project: str = "DysonSpherain",
+        session_id: str = "",
+        write_ledger: bool = False,
     ) -> dict[str, Any]:
         return call_tool(
             "dyson_token_economy_eval",
             {
                 "query": query,
                 "candidate_context": candidate_context,
+                "existing_context": existing_context,
                 "baseline_context_tokens": baseline_context_tokens,
                 "token_budget": token_budget,
                 "task_type": task_type,
+                "mode": mode,
+                "cwd": cwd,
+                "project": project,
+                "session_id": session_id,
+                "write_ledger": write_ledger,
             },
         )
 

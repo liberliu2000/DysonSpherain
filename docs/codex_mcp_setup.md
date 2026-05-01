@@ -53,6 +53,26 @@ Verify:
 dysonspherain adapters doctor --project .
 ```
 
+## Token Economy Workflow
+
+For long-running Codex tasks, the generated `AGENTS.md` policy instructs Codex
+to call memory tools in this order:
+
+1. `dyson_memory_intent`
+2. `dyson_project_state`, `dyson_recall`, and `dyson_context_pack` when the intent says memory is useful
+3. `dyson_token_economy_eval` before injecting candidate context
+4. `dyson_write_memory` after the task with files changed, tests run, failures, token economy anomalies, and next actions
+
+Evaluator decisions should be applied directly:
+
+- `inject`: use rendered context.
+- `inject_summary_only`: use summary plus file refs.
+- `return_file_refs_only`: open the referenced files instead of copying long prose.
+- `skip`: read local files directly and avoid memory injection.
+
+Do not paste raw recall result arrays into prompts. The goal is to reduce LLM
+prompt tokens while preserving the evidence needed for task quality.
+
 The generated MCP entry runs `python -m dysonspherain.adapters.mcp_server`. Install the optional MCP dependency when SDK transport is required:
 
 ```bash

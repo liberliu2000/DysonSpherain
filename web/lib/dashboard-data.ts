@@ -29,6 +29,18 @@ const en = {
     { label: "Sat", saved: 494000 },
     { label: "Sun", saved: 538000 }
   ],
+  tokenObservability: [
+    { name: "Recent injections", status: "14", detail: "Memory injections recorded in the latest token economy ledger window.", progress: 70 },
+    { name: "Decision distribution", status: "inject 64%", detail: "Inject, summary-only, file-reference-only, and skip decisions are tracked separately.", progress: 64 },
+    { name: "Over-budget rate", status: "3.2%", detail: "Rows above the requested context budget are visible before policy rollout.", progress: 3 },
+    { name: "Fallback tokenizer rate", status: "0%", detail: "Tokenizer fallback is reported so token estimates are not silently treated as official.", progress: 0 },
+    { name: "High-risk file refs", status: "2", detail: "Risky memory is routed to file references instead of long prompt prose.", progress: 18 },
+    { name: "Quality guard violations", status: "0", detail: "Token savings are monitored separately from quality guard failures.", progress: 0 }
+  ],
+  economySplit: [
+    { name: "LLM prompt saving", status: "19.7M", detail: "Estimated from baseline context minus final injected prompt tokens.", progress: 82 },
+    { name: "Local compute saving", status: "separate", detail: "Cache/runtime savings are useful diagnostics but are not added to prompt-token savings.", progress: 45 }
+  ],
   memoryRecords: [
     {
       id: "mem-1042",
@@ -130,6 +142,18 @@ const zh: typeof en = {
     { label: "五", saved: 427000 },
     { label: "六", saved: 494000 },
     { label: "日", saved: 538000 }
+  ],
+  tokenObservability: [
+    { name: "最近注入", status: "14", detail: "最新 token economy ledger 窗口中记录的记忆注入次数。", progress: 70 },
+    { name: "决策分布", status: "注入 64%", detail: "分别跟踪注入、仅摘要、仅文件引用和跳过。", progress: 64 },
+    { name: "超预算率", status: "3.2%", detail: "策略推广前可见超过上下文预算的记录。", progress: 3 },
+    { name: "Tokenizer 回退率", status: "0%", detail: "显式报告 tokenizer 回退，避免把估算误当作官方计数。", progress: 0 },
+    { name: "高风险文件引用", status: "2", detail: "高风险记忆转为文件引用，而不是长文本注入。", progress: 18 },
+    { name: "质量护栏违规", status: "0", detail: "token 节省与质量护栏失败分开监控。", progress: 0 }
+  ],
+  economySplit: [
+    { name: "LLM 提示词节省", status: "19.7M", detail: "由基线上下文减去最终注入提示词 token 估算。", progress: 82 },
+    { name: "本地计算节省", status: "单独统计", detail: "缓存/本地运行节省只作为诊断，不计入 prompt token 节省。", progress: 45 }
   ],
   memoryRecords: [
     {

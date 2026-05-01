@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from dysonspherain.context_pack.token_budgeter import budget_policy_for
+
 from .compression_elevator import CompressionElevator
 from .config import AppConfig
 from .models import ActivationBundle
@@ -26,12 +28,14 @@ class ContextAssembler:
         refracted_nodes: list[dict[str, Any]],
         max_tokens: int = 1800,
     ) -> ActivationBundle:
-        core_budget = int(max_tokens * 0.55)
-        object_budget = int(max_tokens * 0.1)
-        support_budget = int(max_tokens * 0.1)
-        experience_budget = int(max_tokens * 0.25)
-        creative_budget = int(max_tokens * 0.15)
-        alternative_budget = int(max_tokens * 0.08)
+        policy = budget_policy_for(task_type, max_tokens)
+        allocations = policy.allocate()
+        core_budget = allocations["core_evidence"]
+        object_budget = int(max_tokens * 0.08)
+        support_budget = allocations["prior_decisions"]
+        experience_budget = int(max_tokens * 0.12)
+        creative_budget = int(max_tokens * 0.06)
+        alternative_budget = allocations["recommended_next_actions"]
         raw_pointer_budget = max_tokens - core_budget - object_budget - support_budget - experience_budget - creative_budget - alternative_budget
 
         core_evidence = self._pack_nodes(main_nodes, core_budget)
@@ -50,6 +54,8 @@ class ContextAssembler:
             "creative_budget": creative_budget,
             "alternative_budget": alternative_budget,
             "raw_pointer_budget": raw_pointer_budget,
+            "budget_policy_ratio_sum": policy.ratio_sum,
+            "budget_manifest": allocations,
             "estimated_input_tokens": sum(
                 self.estimate_tokens(json.dumps(x, ensure_ascii=False))
                 for x in core_evidence + evidence_objects + supporting_context + relevant_experience + creative_reflections + alternative_paths

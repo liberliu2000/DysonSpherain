@@ -199,6 +199,8 @@ DysonSpherain includes a local cockpit for people who do not want to inspect SQL
 dysonspherain ui --project DysonSpherain --port 37777
 ```
 
+The Next.js dashboard in `web/` presents the product-facing console. It shows saved tokens for the past hour, past 24 hours, past 7 days, and total recorded prompt-token savings, plus a 7-day trend chart and the calculation rule used for the estimate. The page defaults to English and can switch to Chinese from the top-right language control. Benchmark content is intentionally not shown in the Web UI.
+
 ---
 
 ## Agent integrations
@@ -289,16 +291,36 @@ dysonspherain index configure-encryption sqlcipher --key-env DYSON_MEMORY_SQLCIP
 DysonSpherain estimates how many tokens are saved when a compact memory pack replaces a larger prompt history.
 
 ```text
-estimated_saved_tokens = max(0, baseline_context_tokens - injected_tokens)
+estimated_saved_tokens = max(0, baseline_context_tokens - final_injected_tokens)
 saving_ratio = estimated_saved_tokens / max(1, baseline_context_tokens)
 ```
 
-Token-economy summaries are available through the CLI, daemon API, Web UI, and benchmark artifact reports.
+Token-economy summaries are available through the CLI, daemon API, Web UI, and artifact reports. The runtime records a standard ledger event per injection with adapter, task type, mode, decision, risk, baseline type, candidate tokens, final injected tokens, duplicate ratio, tokenizer fallback state, source files, and quality guard status.
 
 ```bash
-dysonspherain evaluate-token-economy --help
+dysonspherain evaluate-token-economy-smoke --samples 20 --output artifacts/token_economy_smoke
+dysonspherain evaluate-token-economy \
+  --benchmark-artifact-root artifacts \
+  --memory-db .dyson \
+  --modes off,conservative,exploratory,minimal \
+  --baseline-types full_history,naive_recent,manual_summary \
+  --context-token-budget 800,1200,1600,2400 \
+  --output artifacts/token_economy
+dysonspherain calibrate-tokenizer --input sample_data/tokenizer_calibration_samples.jsonl --output artifacts/tokenizer_calibration.json
 dysonspherain token-economy-final-report --help
 ```
+
+Reports separate LLM prompt token saving from local compute saving. Cache hit rates and local runtime savings are useful diagnostics, but they are not added to prompt-token savings.
+
+Current diagnostic artifacts:
+
+| Artifact | Scope | Key data |
+|---|---|---|
+| `artifacts/token_economy_upgrade_smoke` | Smoke validation | 48 samples, 0 tokenizer fallbacks, mean saved-token ratio 0.8998 |
+| `artifacts/token_economy_full_compare_diagnostic` | Existing full-compare artifact rollup | 192 samples across LongMemEval, LoCoMo, KnowMe, CloneMem; estimated saved prompt tokens 293232; aggregate saved ratio 0.7287 |
+| `artifacts/tokenizer_calibration.json` | Tokenizer calibration sample | 7 samples, 0 missing references, default correction factor 0.9853 |
+
+These artifacts are diagnostic and reproducibility aids. Use full benchmark reports for retrieval-quality claims.
 
 ---
 

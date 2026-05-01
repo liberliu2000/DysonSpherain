@@ -72,6 +72,14 @@ def _history_for_baseline(
     memory_base_dir: Path | None = None,
     project: str = "DysonSpherain",
 ) -> tuple[str, dict[str, Any]]:
+    if baseline_type == "off":
+        return "", {"baseline_source": "off"}
+    if baseline_type == "manual_summary":
+        summary = payload.get("manual_summary") or payload.get("summary")
+        if summary:
+            return str(summary), {"baseline_source": "payload_manual_summary"}
+        history = str(payload.get("history") or payload.get("full_history") or payload.get("context") or "")
+        return "\n".join(history.splitlines()[:8]) or history[:1000], {"baseline_source": "synthetic_manual_summary"}
     if baseline_type == "oracle_minimal":
         oracle = payload.get("oracle_context") or payload.get("gold_evidence")
         if oracle:
@@ -188,6 +196,25 @@ def _quality(payload: dict[str, Any]) -> RetrievalQuality:
     )
 
 
+def _local_compute_from_payload(payload: dict[str, Any], runtime_extra: dict[str, Any]) -> dict[str, Any]:
+    local = payload.get("local_compute_economy") if isinstance(payload.get("local_compute_economy"), dict) else {}
+    if local:
+        return dict(local)
+    diagnostics = runtime_extra.get("diagnostics") if isinstance(runtime_extra.get("diagnostics"), dict) else {}
+    cache = diagnostics.get("cache") if isinstance(diagnostics.get("cache"), dict) else {}
+    compression = diagnostics.get("compression") if isinstance(diagnostics.get("compression"), dict) else {}
+    cache_metrics = payload.get("cache_metrics") if isinstance(payload.get("cache_metrics"), dict) else {}
+    return {
+        "embedding_cache_hit_count": int(cache_metrics.get("embedding_cache_hit_count") or 0),
+        "embedding_cache_miss_count": int(cache_metrics.get("embedding_cache_miss_count") or 0),
+        "embedding_cache_hit_ms_saved": float(cache_metrics.get("embedding_cache_hit_ms_saved") or 0.0),
+        "retrieval_cache_hit_rate": float(cache.get("retrieval_hit") or cache_metrics.get("retrieval_hit") or 0.0),
+        "profile_cache_hit_rate": float(cache.get("profile_hit") or cache_metrics.get("profile_hit") or 0.0),
+        "estimated_local_runtime_saved_ms": float(cache_metrics.get("estimated_local_runtime_saved_ms") or cache_metrics.get("embedding_cache_hit_ms_saved") or 0.0),
+        "dedup_hit_rate": float(compression.get("dedup_hit_rate") or 0.0),
+    }
+
+
 def _sample_from_payload(
     payload: dict[str, Any],
     *,
@@ -206,6 +233,9 @@ def _sample_from_payload(
     baseline_context, baseline_extra = _history_for_baseline(payload, baseline_type, recent_k, memory_base_dir=memory_base_dir, project=project)
     runtime_context, runtime_extra = _assemble_runtime_context(query=query, mode=mode, budget=budget, memory_base_dir=memory_base_dir)
     retrieved = runtime_context or str(payload.get("retrieved_context") or payload.get("evidence") or "")
+    decision = "inject" if retrieved else "skip"
+    if mode == "off":
+        decision = "skip"
     truncated = False
     if not runtime_context:
         retrieved, truncated = _truncate_context(retrieved, budget, counter, allow_evidence_truncation)
@@ -247,6 +277,11 @@ def _sample_from_payload(
             "prompt_parts_best_effort": True,
             "context_truncated": truncated,
             "runtime_context_used": bool(runtime_context),
+            "decision": decision,
+            "adapter": "evaluation",
+            "duplicate_token_ratio": 0.0,
+            "quality_guard_status": "ok",
+            "local_compute_economy": _local_compute_from_payload(payload, runtime_extra),
             **baseline_extra,
             **runtime_extra,
         },
@@ -264,6 +299,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--context-token-budget", default="1600")
     parser.add_argument("--max-samples", type=int, default=0)
     parser.add_argument("--tokenizer-model", default="cl100k_base")
+    parser.add_argument("--tokenizer-strategy", default="auto")
+    parser.add_argument("--tokenizer-calibration")
     parser.add_argument("--modes", default="conservative")
     parser.add_argument("--baseline-types", default="full_history")
     parser.add_argument("--memory-db")
@@ -277,7 +314,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--smoke", action="store_true")
     args = parser.parse_args(argv)
-    counter = TokenCounter(args.tokenizer_model)
+    counter = TokenCounter(args.tokenizer_model, strategy=args.tokenizer_strategy, calibration_file=args.tokenizer_calibration)
     memory_base_dir = _runtime_base_dir_from_memory_db(args.memory_db)
     if args.smoke:
         lines = _smoke_lines()

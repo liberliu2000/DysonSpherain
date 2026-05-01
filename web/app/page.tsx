@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, Calculator, CheckCircle2, DatabaseZap, Search, Send, Sparkles } from "lucide-react";
 import { ArtifactCard } from "@/components/artifact-card";
 import { MemoryEditor } from "@/components/memory-editor";
@@ -12,6 +12,168 @@ import { TimelineItem } from "@/components/timeline-item";
 import { TokenTrendChart } from "@/components/token-trend-chart";
 import { TopNav } from "@/components/top-nav";
 import { getDashboardData, type Locale } from "@/lib/dashboard-data";
+
+type ApiTokenEvent = {
+  decision?: string;
+  estimated_saved_tokens?: number;
+  updated_at?: string;
+};
+
+type ApiTokenSummary = {
+  status?: string;
+  windows?: Record<string, { estimated_saved_tokens?: number; saving_ratio?: number; event_count?: number }>;
+  events?: ApiTokenEvent[];
+  decision_distribution?: Record<string, number>;
+  fallback_tokenizer_rate?: number;
+  over_budget_rate?: number;
+  high_risk_file_ref_cases?: unknown[];
+  quality_guard_violations?: unknown[];
+  top_duplicated_contexts?: unknown[];
+  llm_prompt_token_economy?: { estimated_saved_tokens?: number; saved_ratio?: number };
+  local_compute_economy?: { embedding_cache_hit_rate?: number; retrieval_cache_hit_rate?: number; estimated_local_runtime_saved_ms?: number };
+};
+
+type DashboardData = ReturnType<typeof getDashboardData>;
+type TokenSavingMetric = DashboardData["tokenSavings"][number];
+type ObservabilityItem = DashboardData["tokenObservability"][number];
+type TrendPoint = DashboardData["tokenTrend"][number];
+
+const windowKeys = ["1h", "24h", "7d"] as const;
+
+function numberFormatter(locale: Locale) {
+  return new Intl.NumberFormat(locale === "zh" ? "zh-CN" : "en", {
+    maximumFractionDigits: 1,
+    notation: "compact"
+  });
+}
+
+function percentFormatter(locale: Locale) {
+  return new Intl.NumberFormat(locale === "zh" ? "zh-CN" : "en", {
+    maximumFractionDigits: 1,
+    style: "percent"
+  });
+}
+
+function compactNumber(value: number | undefined, locale: Locale) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "";
+  }
+  return numberFormatter(locale).format(value);
+}
+
+function formatPercent(value: number | undefined, locale: Locale) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return locale === "zh" ? "0%" : "0%";
+  }
+  return percentFormatter(locale).format(Math.max(0, Math.min(1, value)));
+}
+
+function mergeTokenSavings(fallback: TokenSavingMetric[], summary: ApiTokenSummary | null, locale: Locale) {
+  if (!summary?.windows) {
+    return fallback;
+  }
+  const source = [
+    summary.windows["1h"],
+    summary.windows["24h"],
+    summary.windows["7d"],
+    summary.llm_prompt_token_economy || summary.windows["30d"]
+  ];
+  return fallback.map((item, index) => {
+    const window = source[index];
+    if (!window || typeof window.estimated_saved_tokens !== "number") {
+      return item;
+    }
+    const ratio = "saving_ratio" in window ? window.saving_ratio : undefined;
+    const eventCount = "event_count" in window ? window.event_count : summary.events?.length;
+    return {
+      ...item,
+      value: compactNumber(window.estimated_saved_tokens, locale) || item.value,
+      trend:
+        locale === "zh"
+          ? `${formatPercent(ratio, locale)} 节省率，${eventCount ?? 0} 条记录`
+          : `${formatPercent(ratio, locale)} saving ratio from ${eventCount ?? 0} events`
+    };
+  });
+}
+
+function mergeObservability(fallback: ObservabilityItem[], summary: ApiTokenSummary | null, locale: Locale) {
+  if (!summary) {
+    return fallback;
+  }
+  const totalDecisions = Object.values(summary.decision_distribution || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+  const injectCount = Number(summary.decision_distribution?.inject || 0);
+  const injectRate = totalDecisions ? injectCount / totalDecisions : 0;
+  const values = [
+    { status: String(summary.windows?.["24h"]?.event_count ?? fallback[0]?.status), progress: Math.min(100, (summary.windows?.["24h"]?.event_count ?? 0) * 5) },
+    {
+      status: locale === "zh" ? `注入 ${formatPercent(injectRate, locale)}` : `inject ${formatPercent(injectRate, locale)}`,
+      progress: Math.round(injectRate * 100)
+    },
+    { status: formatPercent(summary.over_budget_rate, locale), progress: Math.round((summary.over_budget_rate || 0) * 100) },
+    { status: formatPercent(summary.fallback_tokenizer_rate, locale), progress: Math.round((summary.fallback_tokenizer_rate || 0) * 100) },
+    { status: String(summary.high_risk_file_ref_cases?.length ?? fallback[4]?.status), progress: Math.min(100, (summary.high_risk_file_ref_cases?.length || 0) * 10) },
+    { status: String(summary.quality_guard_violations?.length ?? fallback[5]?.status), progress: Math.min(100, (summary.quality_guard_violations?.length || 0) * 10) }
+  ];
+  return fallback.map((item, index) => ({ ...item, ...(values[index] || {}) }));
+}
+
+function mergeSavingsSplit(fallback: ObservabilityItem[], summary: ApiTokenSummary | null, locale: Locale) {
+  if (!summary) {
+    return fallback;
+  }
+  const prompt = summary.llm_prompt_token_economy;
+  const local = summary.local_compute_economy || {};
+  const savedMs = local.estimated_local_runtime_saved_ms || 0;
+  const localStatus =
+    savedMs > 0
+      ? locale === "zh"
+        ? `${compactNumber(savedMs / 1000, locale)} 秒`
+        : `${compactNumber(savedMs / 1000, locale)} sec`
+      : locale === "zh"
+        ? "单独统计"
+        : "separate";
+  return fallback.map((item, index) => {
+    if (index === 0 && prompt) {
+      return {
+        ...item,
+        status: compactNumber(prompt.estimated_saved_tokens, locale) || item.status,
+        progress: Math.round(Math.max(0, Math.min(1, prompt.saved_ratio || 0)) * 100)
+      };
+    }
+    if (index === 1) {
+      const cacheRate = Math.max(local.embedding_cache_hit_rate || 0, local.retrieval_cache_hit_rate || 0);
+      return { ...item, status: localStatus, progress: Math.round(cacheRate * 100) };
+    }
+    return item;
+  });
+}
+
+function mergeTokenTrend(fallback: TrendPoint[], summary: ApiTokenSummary | null, locale: Locale) {
+  const events = summary?.events || [];
+  if (!events.length) {
+    return fallback;
+  }
+  const byDay = new Map<string, number>();
+  for (const event of events) {
+    const date = event.updated_at ? new Date(event.updated_at) : null;
+    if (!date || Number.isNaN(date.getTime())) {
+      continue;
+    }
+    const key = date.toISOString().slice(0, 10);
+    byDay.set(key, (byDay.get(key) || 0) + Number(event.estimated_saved_tokens || 0));
+  }
+  if (!byDay.size) {
+    return fallback;
+  }
+  const labels = locale === "zh" ? ["日", "一", "二", "三", "四", "五", "六"] : ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const today = new Date();
+  return Array.from({ length: 7 }, (_, offset) => {
+    const date = new Date(today);
+    date.setDate(today.getDate() - (6 - offset));
+    const key = date.toISOString().slice(0, 10);
+    return { label: labels[date.getDay()], saved: byDay.get(key) || 0 };
+  });
+}
 
 const copy = {
   en: {
@@ -84,6 +246,10 @@ const copy = {
       retrievalTitle: "Retrieval health",
       timelineDescription: "The console keeps token saving, recall, editing, and measurement in one loop.",
       timelineTitle: "Runtime timeline",
+      observabilityDescription: "Ledger-backed signals make token savings auditable instead of a hidden estimate.",
+      observabilityTitle: "Token economy observability",
+      splitDescription: "Prompt token saving and local compute saving are shown separately.",
+      splitTitle: "Savings split",
       trendDescription: "A compact 7-day view of memory-assisted context reduction.",
       trendTitle: "Token savings trend",
       workflowDescription: "Each card is a reusable action surface for the next API-backed version.",
@@ -171,6 +337,10 @@ const copy = {
       retrievalTitle: "召回健康度",
       timelineDescription: "控制台将 token 节省、召回、编辑和度量放在同一循环中。",
       timelineTitle: "运行时间线",
+      observabilityDescription: "由 ledger 支撑的信号让 token 节省可审计，而不是隐藏估算。",
+      observabilityTitle: "Token economy 可观测性",
+      splitDescription: "提示词 token 节省与本地计算节省分开展示。",
+      splitTitle: "节省类型拆分",
       trendDescription: "记忆辅助上下文压缩的 7 天紧凑视图。",
       trendTitle: "Token 节省趋势",
       workflowDescription: "每张卡片都是下一版 API 支持的可复用操作表面。",
@@ -197,10 +367,31 @@ export default function Home() {
   const [retrievalResult, setRetrievalResult] = useState("");
   const [autoSummarize, setAutoSummarize] = useState(true);
   const [editableWriteback, setEditableWriteback] = useState(true);
+  const [apiSummary, setApiSummary] = useState<ApiTokenSummary | null>(null);
   const recallRef = useRef<HTMLTextAreaElement>(null);
 
   const t = copy[locale];
   const data = useMemo(() => getDashboardData(locale), [locale]);
+  const tokenSavings = useMemo(() => mergeTokenSavings(data.tokenSavings, apiSummary, locale), [apiSummary, data.tokenSavings, locale]);
+  const observability = useMemo(() => mergeObservability(data.tokenObservability, apiSummary, locale), [apiSummary, data.tokenObservability, locale]);
+  const savingsSplit = useMemo(() => mergeSavingsSplit(data.economySplit, apiSummary, locale), [apiSummary, data.economySplit, locale]);
+  const tokenTrend = useMemo(() => mergeTokenTrend(data.tokenTrend, apiSummary, locale), [apiSummary, data.tokenTrend, locale]);
+
+  useEffect(() => {
+    const base = process.env.NEXT_PUBLIC_DYSON_API_BASE || "http://127.0.0.1:37777";
+    const controller = new AbortController();
+    fetch(`${base}/api/token-economy`, { signal: controller.signal })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((payload) => {
+        if (payload?.status === "ok") {
+          setApiSummary(payload);
+        }
+      })
+      .catch(() => {
+        setApiSummary(null);
+      });
+    return () => controller.abort();
+  }, []);
 
   function scrollTo(id: string) {
     document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -270,20 +461,38 @@ export default function Home() {
         </section>
 
         <section className="metric-grid section" id="tokens" aria-label={t.labels.savedTokenMetrics}>
-          {data.tokenSavings.map((metric) => (
+          {tokenSavings.map((metric) => (
             <MetricCard key={metric.label} {...metric} liveLabel={t.labels.live} />
           ))}
         </section>
 
         <section className="workspace-grid section">
           <SoftPanel title={t.panels.trendTitle} description={t.panels.trendDescription} icon={Sparkles}>
-            <TokenTrendChart ariaLabel={t.chart.aria} data={data.tokenTrend} locale={locale} peakLabel={t.chart.peak} subtitle={t.chart.subtitle} title={t.chart.title} />
+            <TokenTrendChart ariaLabel={t.chart.aria} data={tokenTrend} locale={locale} peakLabel={t.chart.peak} subtitle={t.chart.subtitle} title={t.chart.title} />
           </SoftPanel>
 
           <SoftPanel title={t.calculation.title} description={t.calculation.description} icon={Calculator}>
             <div className="calculation-box soft-inset">
               <p>{t.calculation.example}</p>
               <code>saved = max(0, original_context - memory_pack - retrieval_overhead)</code>
+            </div>
+          </SoftPanel>
+        </section>
+
+        <section className="workspace-grid section">
+          <SoftPanel title={t.panels.observabilityTitle} description={t.panels.observabilityDescription} icon={DatabaseZap}>
+            <div className="route-list two-column">
+              {observability.map((item) => (
+                <RouteCard key={item.name} {...item} />
+              ))}
+            </div>
+          </SoftPanel>
+
+          <SoftPanel title={t.panels.splitTitle} description={t.panels.splitDescription} icon={Calculator}>
+            <div className="route-list">
+              {savingsSplit.map((item) => (
+                <RouteCard key={item.name} {...item} />
+              ))}
             </div>
           </SoftPanel>
         </section>

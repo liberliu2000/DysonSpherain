@@ -1,0 +1,45 @@
+% Artifact-backed baseline table. Pending rows indicate missing formal runs.
+% CloneMem dysonspherain_full uses the formal route-only promoted run when present.
+% CloneMem route-policy hash: 9144917e6cd3c9e3eeef64bc709e02cbf2150b22b33c3a5f99cc05686c8bde51; comparison: non_comparable.
+\begin{tabular}{llll}
+\toprule
+Benchmark & Method & Status & Metrics \\
+\midrule
+clonemem & bm25 & available & ndcg_any@10=0.10216411567209842, recall_any@10=0.17944397641112048, recall_any@5=0.11583824768323504, recall_frac@10=0.06286781995501456 \\
+clonemem & cross_encoder_or_llm_reranker_subset & blocked & pending \\
+clonemem & dense_bm25_rrf & available & ndcg_any@10=0.1264663266957866, recall_any@10=0.23083403538331929, recall_any@5=0.16554338668913227, recall_frac@10=0.08210205501696655 \\
+clonemem & dense_only_bge_or_e5 & blocked & pending \\
+clonemem & dense_only_minilm & available & ndcg_any@10=0.10938405658269965, recall_any@10=0.21103622577927547, recall_any@5=0.13100252737994944, recall_frac@10=0.07386015533656647 \\
+clonemem & dysonspherain_full & available & candidate_recall@100=0.34415887281304297, final_ndcg@10=0.07521185855820516, final_recall@10=0.0953914217393577, ndcg_any@10=0.14418384473163248, recall_any@10=0.2497893850042123, recall_any@5=0.17691659646166807, recall_frac@10=0.0953914217393577 \\
+clonemem & oracle_candidate & available & candidate_recall@100=0.34412143014712515, oracle_candidate_recall@100=0.34412143014712515 \\
+clonemem & oracle_parent & available & oracle_parent_recall@100=1.0 \\
+clonemem & oracle_segment & available & oracle_recall@1=0.9439759036144578, oracle_recall@10=1.0, oracle_recall@5=1.0 \\
+knowme & bm25 & available & ndcg_any@10=0.2862116167922679, recall_any@10=0.3940594059405941, recall_any@5=0.3346534653465347, recall_frac@10=0.4328775432488304 \\
+knowme & cross_encoder_or_llm_reranker_subset & blocked & pending \\
+knowme & dense_bm25_rrf & available & ndcg_any@10=0.3878957157187589, recall_any@10=0.5405940594059406, recall_any@5=0.47128712871287126, recall_frac@10=0.41677020998803177 \\
+knowme & dense_only_bge_or_e5 & blocked & pending \\
+knowme & dense_only_minilm & available & ndcg_any@10=0.3655659131218387, recall_any@10=0.5, recall_any@5=0.43267326732673267, recall_frac@10=0.5232432996046857 \\
+knowme & dysonspherain_full & available & candidate_recall@100=0.7588768904362965, final_ndcg@10=0.4945604269178742, final_recall@10=0.5816937765205091, ndcg_any@10=0.4210600454913102, recall_any@10=0.5683168316831683, recall_any@5=0.500990099009901, recall_frac@10=0.5816937765205091 \\
+knowme & oracle_candidate & available & candidate_recall@100=0.7266449062488667, oracle_candidate_recall@100=0.7266449062488667 \\
+knowme & oracle_parent & available & oracle_parent_recall@100=0.8584158415841584 \\
+knowme & oracle_segment & available & oracle_recall@1=1.0, oracle_recall@10=1.0, oracle_recall@5=1.0 \\
+locomo & bm25 & available & ndcg_any@10=0.7746850725315375, recall_any@10=0.9431017119838873, recall_any@5=0.8741188318227593, recall_frac@10=0.9058872424431337 \\
+locomo & cross_encoder_or_llm_reranker_subset & blocked & pending \\
+locomo & dense_bm25_rrf & available & ndcg_any@10=0.7169532009638346, recall_any@10=0.9516616314199395, recall_any@5=0.8796576032225579, recall_frac@10=0.916299613165172 \\
+locomo & dense_only_bge_or_e5 & blocked & pending \\
+locomo & dense_only_minilm & available & ndcg_any@10=0.6425812181865619, recall_any@10=0.8695871097683786, recall_any@5=0.7477341389728097, recall_frac@10=0.8340086957911732 \\
+locomo & dysonspherain_full & available & candidate_recall@100=1.0, final_ndcg@10=0.7532913590474541, final_recall@10=0.9069580316181525, ndcg_any@10=0.766710383246696, recall_any@10=0.9375629405840886, recall_any@5=0.8610271903323263, recall_frac@10=0.9069580316181525 \\
+locomo & oracle_candidate & available & candidate_recall@100=1.0, oracle_candidate_recall@100=1.0 \\
+locomo & oracle_parent & available & oracle_parent_recall@100=0.9979859013091642 \\
+locomo & oracle_segment & available & oracle_recall@1=1.0, oracle_recall@10=1.0, oracle_recall@5=1.0 \\
+longmemeval & bm25 & available & ndcg_any@10=0.8242046495895633, recall_any@10=0.962, recall_any@5=0.906 \\
+longmemeval & cross_encoder_or_llm_reranker_subset & blocked & pending \\
+longmemeval & dense_bm25_rrf & available & ndcg_any@10=0.908918980770512, recall_any@10=0.988, recall_any@5=0.966 \\
+longmemeval & dense_only_bge_or_e5 & blocked & pending \\
+longmemeval & dense_only_minilm & available & ndcg_any@10=0.8955057588289749, recall_any@10=0.988, recall_any@5=0.96 \\
+longmemeval & dysonspherain_full & available & candidate_recall@100=1.0, final_ndcg@10=0.925885104403386, final_recall@10=0.9777666666666667, ndcg_any@10=0.9323582923336808, recall_any@10=0.992, recall_any@5=0.976 \\
+longmemeval & oracle_candidate & available & candidate_recall@100=1.0, oracle_candidate_recall@100=1.0 \\
+longmemeval & oracle_parent & available & oracle_parent_recall@100=1.0 \\
+longmemeval & oracle_segment & available & oracle_recall@1=1.0, oracle_recall@10=1.0, oracle_recall@5=1.0 \\
+\bottomrule
+\end{tabular}

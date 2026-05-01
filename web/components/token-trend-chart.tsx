@@ -19,7 +19,7 @@ export function TokenTrendChart({ ariaLabel, data, locale, peakLabel, subtitle, 
     notation: "compact",
     maximumFractionDigits: 1
   });
-  const max = Math.max(...data.map((point) => point.saved));
+  const max = Math.max(1, ...data.map((point) => point.saved));
   const points = data
     .map((point, index) => {
       const x = data.length === 1 ? 0 : (index / (data.length - 1)) * 100;

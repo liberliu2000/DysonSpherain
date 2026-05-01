@@ -1,0 +1,32 @@
+\begin{tikzpicture}
+\begin{axis}[
+  ybar,
+  width=0.95\linewidth,
+  height=6cm,
+  ymin=0,
+  ymax=1.05,
+  ylabel={Score},
+  symbolic x coords={LongMemEval,LoCoMo,KnowMe,CloneMem},
+  xtick=data,
+  x tick label style={rotate=20, anchor=east},
+  legend style={at={(0.5,1.02)}, anchor=south, legend columns=2},
+  bar width=9pt,
+  enlarge x limits=0.18,
+  grid=major,
+  grid style={draw=gray!20}
+]
+\addplot coordinates {
+  (LongMemEval,0.9778)
+  (LoCoMo,0.9070)
+  (KnowMe,0.5972)
+  (CloneMem,0.0954)
+};
+\addplot coordinates {
+  (LongMemEval,0.9259)
+  (LoCoMo,0.7533)
+  (KnowMe,0.5051)
+  (CloneMem,0.0752)
+};
+\legend{Final R@10,Final NDCG@10}
+\end{axis}
+\end{tikzpicture}

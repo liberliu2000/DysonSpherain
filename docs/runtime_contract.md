@@ -20,3 +20,20 @@ only.
 
 The HTTP API provides equivalent endpoints through `POST /api/retrieve` and
 `POST /api/context-pack`, plus capsule creation through `POST /api/capsules`.
+
+## Token Economy Events
+
+Every agent adapter that injects memory context should write a token economy
+ledger event. The event records adapter, task type, mode, decision, risk,
+baseline type, candidate context tokens, final injected tokens, estimated saved
+tokens, duplicate ratio, tokenizer fallback state, source files, and quality
+guard status.
+
+The runtime distinguishes:
+
+- LLM prompt token saving: `baseline_context_tokens - final_injected_tokens`.
+- Local compute saving: cache/runtime work avoided locally.
+
+Local compute saving must not be added to LLM prompt token saving. Use
+`GET /api/token-economy` or `dysonspherain evaluate-token-economy` artifacts to
+inspect both categories.

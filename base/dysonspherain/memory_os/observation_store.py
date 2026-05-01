@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from dysonspherain.token_economy.ledger import build_token_economy_event
 from dysonspherain.utils.token_counter import TokenCounter
 from sphere_cli.project_state import archive_memory, get_memory, list_memories, search_memories
 from sphere_cli.security import redact_payload, redact_secrets
@@ -234,18 +235,63 @@ def write_token_economy_event(
     baseline_context_tokens: int,
     estimated_saved_tokens: int,
     budget_usage_ratio: float,
+    adapter: str | None = None,
+    task_type: str = "unknown",
+    mode: str = "conservative",
+    risk: str = "low",
+    reason: str = "",
+    baseline_type: str = "full_history",
+    candidate_context_tokens: int | None = None,
+    final_injected_tokens: int | None = None,
+    duplicate_token_ratio: float = 0.0,
+    protected_evidence_tokens: int = 0,
+    dropped_evidence_count: int = 0,
+    fallback_tokenizer_used: bool = False,
+    tokenizer_name: str = "",
+    quality_guard_status: str = "unknown",
+    source_files: list[str] | None = None,
+    local_compute_economy: dict[str, Any] | None = None,
     source: str = "claude_code_user_prompt_submit",
     metadata: dict[str, Any] | None = None,
     created_at: str | None = None,
     updated_at: str | None = None,
 ) -> dict[str, Any]:
     baseline = max(0, int(baseline_context_tokens or 0))
+    injected = max(0, int(final_injected_tokens if final_injected_tokens is not None else injected_tokens or 0))
+    candidate = max(0, int(candidate_context_tokens if candidate_context_tokens is not None else injected_tokens or 0))
     saved = max(0, int(estimated_saved_tokens or 0))
     saving_ratio = (saved / baseline) if baseline else 0.0
+    event = build_token_economy_event(
+        project=project,
+        query=prompt,
+        decision=decision,
+        adapter=adapter or source,
+        task_type=task_type,
+        mode=mode,
+        risk=risk,
+        reason=reason,
+        baseline_type=baseline_type,
+        baseline_context_tokens=baseline,
+        candidate_context_tokens=candidate,
+        final_injected_tokens=injected,
+        estimated_saved_tokens=saved,
+        duplicate_token_ratio=duplicate_token_ratio,
+        protected_evidence_tokens=protected_evidence_tokens,
+        dropped_evidence_count=dropped_evidence_count,
+        fallback_tokenizer_used=fallback_tokenizer_used,
+        tokenizer_name=tokenizer_name,
+        quality_guard_status=quality_guard_status,
+        source_files=source_files,
+        local_compute_economy=local_compute_economy,
+        timestamp=updated_at or created_at,
+    )
+    event_payload = event.to_dict()
     payload = {
-        "prompt_preview": str(prompt or "")[:240],
+        **event_payload,
+        # Backward-compatible fields consumed by older UI/tests.
+        "prompt_preview": event.query_preview,
         "decision": decision,
-        "injected_tokens": int(injected_tokens or 0),
+        "injected_tokens": injected,
         "baseline_context_tokens": baseline,
         "estimated_saved_tokens": saved,
         "saving_ratio": saving_ratio,
@@ -265,6 +311,7 @@ def write_token_economy_event(
         source=source,
         session_id=session_id,
         metadata=payload,
+        observation_id=event.event_id,
         created_at=created_at,
         updated_at=updated_at,
     )
@@ -470,7 +517,7 @@ def token_economy_summary(base_dir: Path, *, project: str, limit: int = 100) -> 
         meta = dict(record.get("metadata") or {})
         baseline = int(meta.get("baseline_context_tokens") or 0)
         saved = int(meta.get("estimated_saved_tokens") or 0)
-        injected = int(meta.get("injected_tokens") or 0)
+        injected = int(meta.get("final_injected_tokens") or meta.get("injected_tokens") or 0)
         ratio = (saved / baseline) if baseline else 0.0
         events.append(
             {
@@ -479,9 +526,24 @@ def token_economy_summary(base_dir: Path, *, project: str, limit: int = 100) -> 
                 "updated_at": record["updated_at"],
                 "decision": meta.get("decision") or record["title"],
                 "prompt_preview": meta.get("prompt_preview") or "",
+                "adapter": meta.get("adapter") or "unknown",
+                "task_type": meta.get("task_type") or "unknown",
+                "mode": meta.get("mode") or "unknown",
+                "risk": meta.get("risk") or "unknown",
+                "reason": meta.get("reason") or "",
+                "baseline_type": meta.get("baseline_type") or "unknown",
+                "candidate_context_tokens": int(meta.get("candidate_context_tokens") or injected),
+                "final_injected_tokens": injected,
                 "baseline_context_tokens": baseline,
                 "injected_tokens": injected,
                 "estimated_saved_tokens": saved,
+                "compression_ratio": float(meta.get("compression_ratio") or ((injected / baseline) if baseline else 0.0)),
+                "duplicate_token_ratio": float(meta.get("duplicate_token_ratio") or 0.0),
+                "fallback_tokenizer_used": bool(meta.get("fallback_tokenizer_used") or False),
+                "tokenizer_name": meta.get("tokenizer_name") or "",
+                "quality_guard_status": meta.get("quality_guard_status") or "unknown",
+                "source_files": meta.get("source_files") or [],
+                "local_compute_economy": meta.get("local_compute_economy") or {},
                 "saving_ratio": ratio,
                 "budget_usage_ratio": float(meta.get("budget_usage_ratio") or 0.0),
                 "citation": record["citation"],
@@ -503,14 +565,64 @@ def token_economy_summary(base_dir: Path, *, project: str, limit: int = 100) -> 
             "saving_ratio": (saved_total / baseline_total) if baseline_total else 0.0,
         }
 
+    def distribution(key: str) -> dict[str, int]:
+        result: dict[str, int] = {}
+        for event in events:
+            value = str(event.get(key) or "unknown")
+            result[value] = result.get(value, 0) + 1
+        return result
+
+    duplicate_contexts = [
+        event for event in sorted(events, key=lambda item: float(item.get("duplicate_token_ratio") or 0.0), reverse=True)
+        if float(event.get("duplicate_token_ratio") or 0.0) > 0
+    ][:10]
+    high_risk_file_ref_cases = [event for event in events if event.get("risk") == "high" or event.get("decision") == "return_file_refs_only"][:10]
+    quality_guard_violations = [event for event in events if event.get("quality_guard_status") == "violation"][:10]
+    local_values = [event.get("local_compute_economy") for event in events if isinstance(event.get("local_compute_economy"), dict)]
+    embedding_hits = sum(float(value.get("embedding_cache_hit_count") or value.get("embedding_cache_hits") or 0.0) for value in local_values)
+    embedding_misses = sum(float(value.get("embedding_cache_miss_count") or value.get("embedding_cache_misses") or 0.0) for value in local_values)
+    embedding_total = embedding_hits + embedding_misses
+    retrieval_rates = [float(value.get("retrieval_cache_hit_rate") or 0.0) for value in local_values if value.get("retrieval_cache_hit_rate") is not None]
+    profile_rates = [float(value.get("profile_cache_hit_rate") or 0.0) for value in local_values if value.get("profile_cache_hit_rate") is not None]
+    local_compute = {
+        "embedding_cache_hit_rate": (embedding_hits / embedding_total) if embedding_total else 0.0,
+        "retrieval_cache_hit_rate": (sum(retrieval_rates) / len(retrieval_rates)) if retrieval_rates else 0.0,
+        "profile_cache_hit_rate": (sum(profile_rates) / len(profile_rates)) if profile_rates else 0.0,
+        "estimated_local_runtime_saved_ms": round(sum(float(value.get("estimated_local_runtime_saved_ms") or value.get("embedding_cache_hit_ms_saved") or 0.0) for value in local_values), 2),
+    }
     return {
         "status": "ok",
         "project": project,
         "windows": {
+            "1h": {
+                **(lambda selected: {
+                    "days": 0,
+                    "hours": 1,
+                    "event_count": len(selected),
+                    "baseline_context_tokens": sum(int(event["baseline_context_tokens"]) for event in selected),
+                    "injected_tokens": sum(int(event["injected_tokens"]) for event in selected),
+                    "estimated_saved_tokens": sum(int(event["estimated_saved_tokens"]) for event in selected),
+                    "saving_ratio": (
+                        sum(int(event["estimated_saved_tokens"]) for event in selected) / sum(int(event["baseline_context_tokens"]) for event in selected)
+                        if sum(int(event["baseline_context_tokens"]) for event in selected)
+                        else 0.0
+                    ),
+                })([event for event in events if _parse_time(event["updated_at"]) >= now - timedelta(hours=1)])
+            },
             "24h": window(1),
             "7d": window(7),
             "30d": window(30),
         },
+        "decision_distribution": distribution("decision"),
+        "adapter_distribution": distribution("adapter"),
+        "mode_distribution": distribution("mode"),
+        "fallback_tokenizer_rate": (sum(1 for event in events if event.get("fallback_tokenizer_used")) / len(events)) if events else 0.0,
+        "over_budget_rate": (sum(1 for event in events if float(event.get("budget_usage_ratio") or 0.0) > 1.0) / len(events)) if events else 0.0,
+        "top_duplicated_contexts": duplicate_contexts,
+        "high_risk_file_ref_cases": high_risk_file_ref_cases,
+        "quality_guard_violations": quality_guard_violations,
+        "llm_prompt_token_economy": window(30),
+        "local_compute_economy": local_compute,
         "events": events,
     }
 

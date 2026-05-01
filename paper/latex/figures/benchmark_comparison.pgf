@@ -1,0 +1,12 @@
+\begin{tikzpicture}
+\begin{axis}[
+  ybar, width=0.98\linewidth, height=6.4cm, ymin=0, ymax=1.05,
+  ylabel={Score}, symbolic x coords={longmemeval,locomo,knowme,clonemem}, xtick=data, x tick label style={rotate=20, anchor=east},
+  legend style={at={(0.5,1.02)}, anchor=south, legend columns=3},
+  bar width=5pt, enlarge x limits=0.15, grid=major, grid style={draw=gray!20}]
+\addplot coordinates {(longmemeval,1.0000) (locomo,1.0000) (knowme,0.7266) (clonemem,0.3442)};
+\addplot coordinates {(longmemeval,0.9778) (locomo,0.9070) (knowme,0.5972) (clonemem,0.0954)};
+\addplot coordinates {(longmemeval,0.0222) (locomo,0.0930) (knowme,0.1294) (clonemem,0.2488)};
+\legend{Admission R@100,Final R@10,Admission-Final Gap}
+\end{axis}
+\end{tikzpicture}

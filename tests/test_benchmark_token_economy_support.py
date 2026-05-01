@@ -67,6 +67,12 @@ class BenchmarkTokenEconomySupportTests(unittest.TestCase):
             self.assertTrue((root / "token_economy_token_quality_tradeoff.csv").exists())
             self.assertTrue((root / "token_economy_failure_cases.json").exists())
             self.assertTrue((root / "token_economy_manifest.json").exists())
+            ledger_path = root / "token_economy_ledger_events.jsonl"
+            self.assertTrue(ledger_path.exists())
+            ledger_rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertEqual(len(ledger_rows), 1)
+            self.assertEqual(ledger_rows[0]["adapter"], "benchmark")
+            self.assertEqual(ledger_rows[0]["ledger_version"], "token-economy-ledger-v1")
             self.assertEqual(result["summary"]["sample_count"], 1)
             self.assertEqual(result["thresholds"]["low_saving_threshold"], 0.99)
 
