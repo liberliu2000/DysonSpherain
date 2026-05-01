@@ -1,0 +1,24 @@
+{
+  "description": "MCP memory, progressive observation recall, hooks, and token economy diagnostics.",
+  "displayName": "DysonSpherain Memory",
+  "mcp": {
+    "args": [
+      "-m",
+      "dysonspherain.adapters.mcp_server"
+    ],
+    "command": "python"
+  },
+  "name": "dyson-memory",
+  "tools": [
+    "dyson_memory_intent",
+    "dyson_search_memory",
+    "dyson_timeline",
+    "dyson_get_observations",
+    "dyson_resume_context",
+    "dyson_recall",
+    "dyson_context_pack",
+    "dyson_write_memory",
+    "dyson_project_state",
+    "dyson_token_economy_eval"
+  ]
+}

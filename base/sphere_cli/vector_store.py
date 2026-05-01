@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
+import warnings
 from pathlib import Path
 from time import perf_counter
 from time import sleep
 from typing import Any, Protocol, cast
 
 from .config import AppConfig
-from .embedding import EmbeddingProvider
+from .embedding import EMBEDDING_PREPROCESS_VERSION, EmbeddingProvider
 from .storage import Storage
 from .utils import stable_content_hash
 
@@ -129,7 +131,11 @@ class _JsonVectorCollection:
     def _matches_where(cls, metadata: dict[str, Any], where: dict[str, Any] | None) -> bool:
         if not where:
             return True
+        if "$and" in where:
+            return all(cls._matches_where(metadata, dict(child or {})) for child in list(where.get("$and") or []))
         for key, expected in where.items():
+            if key == "$and":
+                continue
             actual = metadata.get(key)
             if isinstance(expected, dict):
                 if "$eq" in expected and str(actual) != str(expected["$eq"]):
@@ -146,6 +152,11 @@ class _JsonVectorCollection:
 
 class _JsonVectorClient:
     def __init__(self, path: str) -> None:
+        warnings.warn(
+            "JSON vector backend is O(N) scan and intended for small/offline tests only.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         self.path = Path(path)
         self.path.mkdir(parents=True, exist_ok=True)
         self.state_path = self.path / "json_vector_store.json"
@@ -188,12 +199,12 @@ def _build_chroma_client(path: str, backend: str = "auto") -> _ChromaClient:
     except ModuleNotFoundError as exc:
         if backend == "auto":
             return cast(_ChromaClient, _JsonVectorClient(path))
-        raise RuntimeError("chromadb is required for vector storage") from exc
+        raise RuntimeError("chromadb is required for vector storage; SPHERE_VECTOR_BACKEND=chroma cannot fall back to JSON") from exc
     persistent_client = getattr(chromadb_module, "PersistentClient", None)
     if persistent_client is None:
         if backend == "auto":
             return cast(_ChromaClient, _JsonVectorClient(path))
-        raise RuntimeError("chromadb.PersistentClient is not available")
+        raise RuntimeError("chromadb.PersistentClient is not available; SPHERE_VECTOR_BACKEND=chroma cannot fall back to JSON")
     return cast(_ChromaClient, persistent_client(path=path))
 
 
@@ -209,6 +220,9 @@ class VectorStore:
             fail_fast=config.embedding_fail_fast,
         )
         self.client = _build_chroma_client(str(config.vector_dir), backend=config.vector_backend)
+        self._json_scan_warning = ""
+        self._vector_backend_resolved = "json" if isinstance(self.client, _JsonVectorClient) else "chroma"
+        self._fallback_in_use = self._vector_backend_resolved == "json" and str(config.vector_backend or "auto").lower() == "auto"
         self._stats: dict[str, dict[str, float | int]] = {}
         self._counters: dict[str, int] = {
             "vector_dedup_hit_count": 0,
@@ -225,12 +239,31 @@ class VectorStore:
         self.object_collection = self.client.get_or_create_collection(name=config.object_collection_name)
         self.proxy_collection = self.client.get_or_create_collection(name=config.proxy_collection_name)
         self._reconcile_sync_state()
+        self._enforce_json_backend_guard()
 
     def _refresh_collections(self) -> None:
         self.client = _build_chroma_client(str(self.config.vector_dir), backend=self.config.vector_backend)
+        self._vector_backend_resolved = "json" if isinstance(self.client, _JsonVectorClient) else "chroma"
+        self._fallback_in_use = self._vector_backend_resolved == "json" and str(self.config.vector_backend or "auto").lower() == "auto"
         self.raw_collection = self.client.get_or_create_collection(name=self.config.vector_collection_name)
         self.object_collection = self.client.get_or_create_collection(name=self.config.object_collection_name)
         self.proxy_collection = self.client.get_or_create_collection(name=self.config.proxy_collection_name)
+        self._enforce_json_backend_guard()
+
+    def _enforce_json_backend_guard(self) -> None:
+        if self._vector_backend_resolved != "json":
+            self._json_scan_warning = ""
+            return
+        vector_count = int(self.raw_collection.count()) + int(self.object_collection.count()) + int(self.proxy_collection.count())
+        max_items = max(1, int(getattr(self.config, "json_vector_max_items", 5000) or 5000))
+        message = "JSON vector backend is O(N) scan and intended for small/offline tests only."
+        if vector_count > max_items:
+            message = f"{message} vector_count={vector_count} exceeds SPHERE_JSON_VECTOR_MAX_ITEMS={max_items}."
+            if bool(getattr(self.config, "vector_fail_fast_on_fallback", False)):
+                raise RuntimeError(message)
+        self._json_scan_warning = message
+        if bool(getattr(self.config, "warn_on_json_vector_backend", True)):
+            warnings.warn(message, RuntimeWarning, stacklevel=2)
 
     @staticmethod
     def _is_retryable_query_error(exc: Exception) -> bool:
@@ -255,6 +288,8 @@ class VectorStore:
                     collection = self.object_collection
                 else:
                     collection = self.proxy_collection
+                if self._vector_backend_resolved == "json":
+                    self._enforce_json_backend_guard()
                 return collection.query(
                     query_embeddings=[query_embedding],
                     n_results=n_results,
@@ -270,6 +305,58 @@ class VectorStore:
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("query retry loop exited unexpectedly")
+
+    def _query_many_with_retry(
+        self,
+        *,
+        collection_name: str,
+        query_embeddings: list[list[float]],
+        n_results: int,
+        where: dict[str, Any] | None,
+        include: list[str],
+    ) -> dict[str, Any]:
+        if self._vector_backend_resolved == "json":
+            ids: list[list[str]] = []
+            documents: list[list[str]] = []
+            metadatas: list[list[dict[str, Any]]] = []
+            distances: list[list[float]] = []
+            for query_embedding in query_embeddings:
+                result = self._query_with_retry(
+                    collection_name=collection_name,
+                    query_embedding=query_embedding,
+                    n_results=n_results,
+                    where=where,
+                    include=include,
+                )
+                ids.append(list(result.get("ids", [[]])[0]))
+                documents.append(list(result.get("documents", [[]])[0]))
+                metadatas.append(list(result.get("metadatas", [[]])[0]))
+                distances.append(list(result.get("distances", [[]])[0]))
+            return {"ids": ids, "documents": documents, "metadatas": metadatas, "distances": distances}
+        last_exc: Exception | None = None
+        for attempt in range(4):
+            try:
+                if collection_name == "raw":
+                    collection = self.raw_collection
+                elif collection_name == "object":
+                    collection = self.object_collection
+                else:
+                    collection = self.proxy_collection
+                return collection.query(
+                    query_embeddings=query_embeddings,
+                    n_results=n_results,
+                    where=where,
+                    include=include,
+                )
+            except Exception as exc:
+                if not self._is_retryable_query_error(exc) or attempt == 3:
+                    raise
+                last_exc = exc
+                sleep(0.2 * (attempt + 1))
+                self._refresh_collections()
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("batch query retry loop exited unexpectedly")
 
     def _record_stat(self, operation: str, elapsed_ms: float, rows: int | None = None) -> None:
         bucket = self._stats.setdefault(operation, {"calls": 0, "total_ms": 0.0, "rows": 0})
@@ -299,6 +386,20 @@ class VectorStore:
     def _increment_counter(self, key: str, value: int) -> None:
         self._counters[key] = int(self._counters.get(key, 0)) + int(value)
 
+    @staticmethod
+    def _merge_where_filters(base: dict[str, Any] | None, extra: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not base:
+            return dict(extra or {}) or None
+        if not extra:
+            return dict(base)
+        return {"$and": [dict(base), dict(extra)]}
+
+    def embed_query(self, query: str) -> list[float]:
+        started = perf_counter()
+        embedding = self.embedder.embed(query)
+        self._record_stat("embed_query", (perf_counter() - started) * 1000.0, rows=1)
+        return embedding
+
     def snapshot_stats(self, reset: bool = False) -> dict[str, Any]:
         ops = {
             name: {
@@ -323,6 +424,30 @@ class VectorStore:
                 "vector_dedup_miss_count": 0,
             }
         return snapshot
+
+    def _format_query_rows(
+        self,
+        *,
+        id_key: str,
+        ids: list[Any],
+        docs: list[Any],
+        metas: list[Any],
+        dists: list[Any],
+    ) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for item_id, doc, meta, dist in zip(ids, docs, metas, dists):
+            distance = float(dist or 0.0)
+            similarity = self._distance_to_similarity(distance)
+            items.append(
+                {
+                    id_key: str(item_id),
+                    "document": doc,
+                    "metadata": meta,
+                    "distance": distance,
+                    "similarity": round(similarity, 4),
+                }
+            )
+        return items
 
     def upsert_chunks(self, chunks: list[dict[str, Any]]) -> None:
         chunks = [chunk for chunk in chunks if not chunk.get("skip_vector")]
@@ -372,6 +497,15 @@ class VectorStore:
                     "neighbor_count": int(chunk.get("neighbor_count") or 0),
                     "created_at": str(chunk.get("created_at") or ""),
                     "timestamp": str(chunk.get("timestamp") or chunk.get("created_at") or ""),
+                    "benchmark_name": str(chunk.get("benchmark_name") or ""),
+                    "benchmark_adapter_version": str(chunk.get("benchmark_adapter_version") or ""),
+                    "source_doc_id": str(chunk.get("source_doc_id") or ""),
+                    "source_segment_id": str(chunk.get("source_segment_id") or ""),
+                    "sample_id": str(chunk.get("sample_id") or ""),
+                    "conversation_id": str(chunk.get("conversation_id") or ""),
+                    "turn_id": str(chunk.get("turn_id") or ""),
+                    "speaker_id": str(chunk.get("speaker_id") or ""),
+                    "original_segment_text": str(chunk.get("original_segment_text") or ""),
                 }
                 for chunk in batch
             ]
@@ -381,6 +515,7 @@ class VectorStore:
             started = perf_counter()
             self.raw_collection.upsert(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
             self._record_stat("upsert_chunks", (perf_counter() - started) * 1000.0, rows=len(ids))
+            self._enforce_json_backend_guard()
         self._mark_synced(
             collection_name=getattr(self.raw_collection, "name", self.config.vector_collection_name),
             items=pending,
@@ -429,6 +564,7 @@ class VectorStore:
             started = perf_counter()
             self.object_collection.upsert(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
             self._record_stat("upsert_objects", (perf_counter() - started) * 1000.0, rows=len(ids))
+            self._enforce_json_backend_guard()
         self._mark_synced(
             collection_name=getattr(self.object_collection, "name", self.config.object_collection_name),
             items=pending,
@@ -473,6 +609,7 @@ class VectorStore:
             started = perf_counter()
             self.proxy_collection.upsert(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
             self._record_stat("upsert_representations", (perf_counter() - started) * 1000.0, rows=len(ids))
+            self._enforce_json_backend_guard()
         self._mark_synced(
             collection_name=getattr(self.proxy_collection, "name", self.config.proxy_collection_name),
             items=pending,
@@ -482,9 +619,15 @@ class VectorStore:
     def search(self, query: str, top_k: int = 8, where: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         if not query.strip():
             return []
-        started = perf_counter()
-        query_embedding = self.embedder.embed(query)
-        self._record_stat("embed_query", (perf_counter() - started) * 1000.0, rows=1)
+        query_embedding = self.embed_query(query)
+        return self.search_by_embedding(query_embedding, top_k=top_k, where=where)
+
+    def search_by_embedding(
+        self,
+        query_embedding: list[float],
+        top_k: int = 8,
+        where: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         started = perf_counter()
         result = self._query_with_retry(
             collection_name="raw",
@@ -493,32 +636,76 @@ class VectorStore:
             where=where,
             include=["documents", "metadatas", "distances"],
         )
+        self._increment_counter("dense_search_count", 1)
         self._record_stat("search_chunks", (perf_counter() - started) * 1000.0, rows=len(result.get("ids", [[]])[0]))
-        ids = result.get("ids", [[]])[0]
-        docs = result.get("documents", [[]])[0]
-        metas = result.get("metadatas", [[]])[0]
-        dists = result.get("distances", [[]])[0]
-        items: list[dict[str, Any]] = []
-        for chunk_id, doc, meta, dist in zip(ids, docs, metas, dists):
-            distance = float(dist or 0.0)
-            similarity = self._distance_to_similarity(distance)
-            items.append(
-                {
-                    "chunk_id": chunk_id,
-                    "document": doc,
-                    "metadata": meta,
-                    "distance": distance,
-                    "similarity": round(similarity, 4),
-                }
+        return self._format_query_rows(
+            id_key="chunk_id",
+            ids=list(result.get("ids", [[]])[0]),
+            docs=list(result.get("documents", [[]])[0]),
+            metas=list(result.get("metadatas", [[]])[0]),
+            dists=list(result.get("distances", [[]])[0]),
+        )
+
+    def search_many(self, queries: list[str], top_k: int = 8, where: dict[str, Any] | None = None) -> list[list[dict[str, Any]]]:
+        clean_queries = [query for query in queries if query.strip()]
+        if not clean_queries:
+            return []
+        started = perf_counter()
+        query_embeddings = self.embedder.embed_many(clean_queries)
+        self._record_stat("embed_query", (perf_counter() - started) * 1000.0, rows=len(clean_queries))
+        try:
+            query_batch_size = max(1, int(os.getenv("SPHERE_VECTOR_QUERY_BATCH_SIZE", "64") or "64"))
+        except ValueError:
+            query_batch_size = 64
+        started = perf_counter()
+        result_ids: list[list[Any]] = []
+        result_docs: list[list[Any]] = []
+        result_metas: list[list[Any]] = []
+        result_dists: list[list[Any]] = []
+        for start_index in range(0, len(query_embeddings), query_batch_size):
+            batch_embeddings = query_embeddings[start_index : start_index + query_batch_size]
+            result = self._query_many_with_retry(
+                collection_name="raw",
+                query_embeddings=batch_embeddings,
+                n_results=max(1, top_k),
+                where=where,
+                include=["documents", "metadatas", "distances"],
             )
-        return items
+            result_ids.extend(list(result.get("ids", [])))
+            result_docs.extend(list(result.get("documents", [])))
+            result_metas.extend(list(result.get("metadatas", [])))
+            result_dists.extend(list(result.get("distances", [])))
+        self._increment_counter("dense_search_count", len(clean_queries))
+        if len(clean_queries) > 1:
+            self._increment_counter("query_embedding_reuse_count", len(clean_queries) - 1)
+        if query_batch_size > 1:
+            self._increment_counter("batched_query_call_count", (len(clean_queries) + query_batch_size - 1) // query_batch_size)
+        self._record_stat("search_chunks", (perf_counter() - started) * 1000.0, rows=sum(len(ids) for ids in result_ids))
+        all_items: list[list[dict[str, Any]]] = []
+        for ids, docs, metas, dists in zip(result_ids, result_docs, result_metas, result_dists):
+            all_items.append(
+                self._format_query_rows(
+                    id_key="chunk_id",
+                    ids=list(ids),
+                    docs=list(docs),
+                    metas=list(metas),
+                    dists=list(dists),
+                )
+            )
+        return all_items
 
     def search_objects(self, query: str, top_k: int = 8, where: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         if not query.strip():
             return []
-        started = perf_counter()
-        query_embedding = self.embedder.embed(query)
-        self._record_stat("embed_object_query", (perf_counter() - started) * 1000.0, rows=1)
+        query_embedding = self.embed_query(query)
+        return self.search_objects_by_embedding(query_embedding, top_k=top_k, where=where)
+
+    def search_objects_by_embedding(
+        self,
+        query_embedding: list[float],
+        top_k: int = 8,
+        where: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         started = perf_counter()
         result = self._query_with_retry(
             collection_name="object",
@@ -527,25 +714,15 @@ class VectorStore:
             where=where,
             include=["documents", "metadatas", "distances"],
         )
+        self._increment_counter("object_search_count", 1)
         self._record_stat("search_objects", (perf_counter() - started) * 1000.0, rows=len(result.get("ids", [[]])[0]))
-        ids = result.get("ids", [[]])[0]
-        docs = result.get("documents", [[]])[0]
-        metas = result.get("metadatas", [[]])[0]
-        dists = result.get("distances", [[]])[0]
-        items: list[dict[str, Any]] = []
-        for object_id, doc, meta, dist in zip(ids, docs, metas, dists):
-            distance = float(dist or 0.0)
-            similarity = self._distance_to_similarity(distance)
-            items.append(
-                {
-                    "object_id": object_id,
-                    "document": doc,
-                    "metadata": meta,
-                    "distance": distance,
-                    "similarity": round(similarity, 4),
-                }
-            )
-        return items
+        return self._format_query_rows(
+            id_key="object_id",
+            ids=list(result.get("ids", [[]])[0]),
+            docs=list(result.get("documents", [[]])[0]),
+            metas=list(result.get("metadatas", [[]])[0]),
+            dists=list(result.get("distances", [[]])[0]),
+        )
 
     def search_proxies(
         self,
@@ -556,26 +733,43 @@ class VectorStore:
     ) -> list[dict[str, Any]]:
         if not query.strip():
             return []
-        started = perf_counter()
-        query_embedding = self.embedder.embed(query)
-        self._record_stat("embed_proxy_query", (perf_counter() - started) * 1000.0, rows=1)
+        query_embedding = self.embed_query(query)
+        return self.search_proxies_by_embedding(query_embedding, top_k=top_k, where=where, proxy_kinds=proxy_kinds)
+
+    def search_proxies_by_embedding(
+        self,
+        query_embedding: list[float],
+        top_k: int = 8,
+        where: dict[str, Any] | None = None,
+        proxy_kinds: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        allowed_kinds = set(proxy_kinds or [])
+        effective_where = self._merge_where_filters(
+            where,
+            {"proxy_kind": {"$in": sorted(allowed_kinds)}} if allowed_kinds else None,
+        )
         started = perf_counter()
         result = self._query_with_retry(
             collection_name="proxy",
             query_embedding=query_embedding,
             n_results=max(1, top_k),
-            where=where,
+            where=effective_where,
             include=["documents", "metadatas", "distances"],
         )
+        raw_hits = len(result.get("ids", [[]])[0])
+        self._increment_counter("proxy_search_count", 1)
+        if allowed_kinds:
+            self._increment_counter("prefilter_applied", 1)
+            self._increment_counter("raw_vector_hits", raw_hits)
         self._record_stat("search_proxies", (perf_counter() - started) * 1000.0, rows=len(result.get("ids", [[]])[0]))
         ids = result.get("ids", [[]])[0]
         docs = result.get("documents", [[]])[0]
         metas = result.get("metadatas", [[]])[0]
         dists = result.get("distances", [[]])[0]
         items: list[dict[str, Any]] = []
-        allowed_kinds = set(proxy_kinds or [])
         for representation_id, doc, meta, dist in zip(ids, docs, metas, dists):
             if allowed_kinds and str((meta or {}).get("proxy_kind") or "") not in allowed_kinds:
+                self._increment_counter("filtered_out_count", 1)
                 continue
             distance = float(dist or 0.0)
             similarity = self._distance_to_similarity(distance)
@@ -588,6 +782,8 @@ class VectorStore:
                     "similarity": round(similarity, 4),
                 }
             )
+        if allowed_kinds:
+            self._increment_counter("postfilter_hits", len(items))
         return items
 
     def delete_chunks(self, chunk_ids: list[str]) -> None:
@@ -630,9 +826,16 @@ class VectorStore:
             "proxy_count": int(self.proxy_collection.count()),
             "embedding_provider": self.embedder.info.provider,
             "embedding_model": self.embedder.info.model_name,
+            "embedding_dim": int(self.embedder.info.embedding_dim),
+            "embedding_preprocess_version": EMBEDDING_PREPROCESS_VERSION,
+            "normalize_embeddings": True,
             "fallback_in_use": self.embedder.info.fallback_in_use,
             "embedding_cache": self.embedder.cache_stats(),
-            "vector_backend": self.config.vector_backend,
+            "vector_backend": self._vector_backend_resolved,
+            "vector_backend_requested": self.config.vector_backend,
+            "vector_fallback_in_use": self._fallback_in_use,
+            "vector_count": int(self.raw_collection.count()) + int(self.object_collection.count()) + int(self.proxy_collection.count()),
+            "json_scan_warning": self._json_scan_warning,
             "primary_embedding_load_error": getattr(self.embedder, "primary_load_error", None),
         }
 

@@ -9,13 +9,53 @@ from typing import Iterable
 
 
 WORD_RE = re.compile(r"[A-Za-z0-9_\-\u4e00-\u9fff]+")
+COMPOUND_WORD_RE = re.compile(r"[A-Za-z0-9_]+(?:[./@:\-][A-Za-z0-9_]+)+")
+CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+ALNUM_BOUNDARY_RE = re.compile(r"(?<=\D)(?=\d)|(?<=\d)(?=\D)")
+SEPARATOR_SPLIT_RE = re.compile(r"[_\-./@:]+")
+
+
+def _expand_token_variants(token: str) -> tuple[str, ...]:
+    queue = [str(token or "").strip()]
+    ordered: list[str] = []
+    seen: set[str] = set()
+    while queue:
+        part = queue.pop(0).strip()
+        if not part:
+            continue
+        lowered = part.lower()
+        if lowered not in seen:
+            seen.add(lowered)
+            ordered.append(lowered)
+        separator_parts = [piece for piece in SEPARATOR_SPLIT_RE.split(part) if piece]
+        if len(separator_parts) > 1:
+            queue.extend(separator_parts)
+        camel_parts = [piece for piece in CAMEL_BOUNDARY_RE.sub(" ", part).split() if piece]
+        if len(camel_parts) > 1:
+            queue.extend(camel_parts)
+        alnum_parts = [piece for piece in ALNUM_BOUNDARY_RE.sub(" ", part).split() if piece]
+        if len(alnum_parts) > 1:
+            queue.extend(alnum_parts)
+    return tuple(ordered)
 
 
 @lru_cache(maxsize=50000)
 def _tokenize_cached(text: str) -> tuple[str, ...]:
     if not text:
         return ()
-    return tuple(t.lower() for t in WORD_RE.findall(text))
+    ordered: list[str] = []
+    seen: set[str] = set()
+    # Preserve compound surface forms such as `base/sphere_cli/config.py`,
+    # `recall@10`, and `python3.12`, then expand them into subparts below.
+    raw_tokens = list(COMPOUND_WORD_RE.findall(text))
+    raw_tokens.extend(WORD_RE.findall(text))
+    for raw in raw_tokens:
+        for token in _expand_token_variants(raw):
+            if token in seen:
+                continue
+            seen.add(token)
+            ordered.append(token)
+    return tuple(ordered)
 
 
 def tokenize(text: str) -> list[str]:

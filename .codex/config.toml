@@ -1,0 +1,22 @@
+[mcp_servers.dyson-memory]
+command = "python"
+args = ["-m", "dysonspherain.adapters.mcp_server"]
+cwd = "."
+tool_timeout_sec = 60
+startup_timeout_sec = 20
+enabled_tools = [
+  "dyson_memory_intent",
+  "dyson_recall",
+  "dyson_context_pack",
+  "dyson_write_memory",
+  "dyson_project_state",
+  "dyson_token_economy_eval",
+  "dyson_search_memory",
+  "dyson_timeline",
+  "dyson_get_observations",
+  "dyson_resume_context",
+]
+
+[mcp_servers.dyson-memory.env]
+DYSON_HOME = ".dyson"
+DYSON_PROJECT_ROOT = "."

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import gc
 import hashlib
 import json
@@ -9,7 +10,7 @@ import os
 import re
 import shutil
 import sys
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -30,9 +31,38 @@ from sphere_cli.reranker import RetrievalReranker
 from sphere_cli.storage import Storage
 from sphere_cli.utils import deterministic_angle, stable_content_hash
 from sphere_cli.vector_store import VectorStore
+from benchmark_support import (
+    BENCHMARK_CHUNKER_VERSION,
+    annotate_chunks_for_benchmark,
+    assert_benchmark_vector_guard,
+    best_gold_rank,
+    build_candidate_recall_summary,
+    build_index_metadata,
+    build_integrity_report,
+    build_oracle_retrieval_report,
+    build_per_channel_contribution_report,
+    build_performance_cache_report,
+    build_query_diagnostic,
+    build_raw_counts,
+    build_query_failure,
+    build_result_metadata,
+    build_runtime_fingerprint,
+    build_topk_debug_record,
+    candidate_rows,
+    configure_benchmark_determinism,
+    force_benchmark_config,
+    ndcg_at,
+    rank_benchmark_sources,
+    recall_at,
+    report_root,
+    write_json,
+    write_jsonl,
+)
+from token_economy_support import add_token_economy_args, record_token_economy_for_metrics
 
 KS = [1, 3, 5, 10, 30, 50]
-BENCHMARK_WORKSPACE_CACHE_VERSION = "longmemeval_v8"
+LONGMEMEVAL_ADAPTER_VERSION = "2026-04-25"
+BENCHMARK_WORKSPACE_CACHE_VERSION = "longmemeval_v9"
 FOCUSED_QUERY_STOPWORDS = {
     "again",
     "what",
@@ -138,6 +168,7 @@ class BenchmarkWorkspace:
     pipeline: EvidencePipeline
     vector_info: dict[str, Any]
     ingest_profile: dict[str, Any]
+    index_metadata: dict[str, Any]
     build_elapsed_ms: float
     manifest_path: Path
 
@@ -173,6 +204,18 @@ def session_id_from_corpus_id(corpus_id: str) -> str:
     if "_turn_" in corpus_id:
         return corpus_id.rsplit("_turn_", 1)[0]
     return corpus_id
+
+
+def remap_rank_rows(rows: list[dict[str, Any]], id_mapper: Any) -> list[dict[str, Any]]:
+    remapped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        source_id = id_mapper(str(row.get("source_id") or row.get("source_segment_id") or ""))
+        if not source_id or source_id in seen:
+            continue
+        remapped.append({**row, "source_id": source_id, "source_segment_id": source_id})
+        seen.add(source_id)
+    return remapped
 
 
 def build_corpus(entry: dict[str, Any], granularity: str) -> list[dict[str, Any]]:
@@ -303,7 +346,7 @@ def build_services(
     base_dir: Path,
     shared_cache_dir: Path | None = None,
 ) -> tuple[AppConfig, Storage, VectorStore, MemoryWriter, ActivationEngine, PathRouter, RetrievalReranker]:
-    config = AppConfig.from_env(base_dir=base_dir)
+    config = force_benchmark_config(AppConfig.from_env(base_dir=base_dir))
     if shared_cache_dir is not None:
         config.shared_cache_dir = shared_cache_dir
         config.cache_dir = shared_cache_dir
@@ -511,7 +554,11 @@ def ingest_corpus(
     sector: str,
     zone: str,
     question_type: str,
-) -> tuple[list[str], dict[str, dict[str, Any]], dict[str, Any]]:
+    benchmark_name: str,
+    adapter_version: str,
+    runtime_fingerprint: dict[str, Any],
+    raw_counts: dict[str, Any] | None = None,
+) -> tuple[list[str], dict[str, dict[str, Any]], dict[str, Any], dict[str, Any]]:
     ordered_corpus_ids: list[str] = []
     corpus_by_node_id: dict[str, dict[str, Any]] = {}
     nodes: list[dict[str, Any]] = []
@@ -534,6 +581,7 @@ def ingest_corpus(
             summary=make_summary(item["text"]),
             content_hash=stable_content_hash(item["text"]),
             content_ref=item["corpus_id"],
+            source_ref=str(item.get("source_segment_id") or item["corpus_id"]),
             raw_content=item["text"],
             theta=theta,
             phi=phi,
@@ -555,6 +603,12 @@ def ingest_corpus(
         stage_start = perf_counter()
         node_objects = writer.extract_objects(node, node_chunks)
         object_extract_ms += (perf_counter() - stage_start) * 1000.0
+        annotate_chunks_for_benchmark(
+            node_chunks,
+            corpus_item=item,
+            benchmark_name=benchmark_name,
+            adapter_version=adapter_version,
+        )
         chunks.extend(node_chunks)
         neighbors.extend(node_neighbors)
         objects.extend(node_objects)
@@ -614,8 +668,16 @@ def ingest_corpus(
         },
         "backend": runtime_stats_delta(runtime_after, runtime_before),
     }
+    index_metadata = build_index_metadata(
+        corpus_items=corpus_items,
+        chunks=chunks,
+        benchmark_name=benchmark_name,
+        adapter_version=adapter_version,
+        runtime_fingerprint=runtime_fingerprint,
+        raw_counts=raw_counts or {},
+    )
 
-    return ordered_corpus_ids, corpus_by_node_id, ingest_profile
+    return ordered_corpus_ids, corpus_by_node_id, ingest_profile, index_metadata
 
 
 def build_workspace_signature(
@@ -624,19 +686,26 @@ def build_workspace_signature(
     shell: int,
     sector: str,
     zone: str,
+    benchmark_name: str,
+    adapter_version: str,
+    runtime_fingerprint: dict[str, Any],
     config: AppConfig | None = None,
 ) -> str:
     payload = {
         "cache_version": BENCHMARK_WORKSPACE_CACHE_VERSION,
+        "benchmark_name": benchmark_name,
+        "benchmark_adapter_version": adapter_version,
         "granularity": granularity,
         "shell": shell,
         "sector": sector,
         "zone": zone,
+        "chunker_version": BENCHMARK_CHUNKER_VERSION,
         "chunk_size": int(config.chunk_size if config else 0),
         "chunk_overlap": int(config.chunk_overlap if config else 0),
         "local_window_span": int(config.local_window_span if config else 0),
         "embed_local_grain": bool(config.embed_local_grain if config else False),
         "embedding_model": str(config.embedding_model_name if config else ""),
+        "runtime_fingerprint_hash": str(runtime_fingerprint.get("fingerprint_hash") or ""),
         "creative_mode": str(config.creative_mode_name if config else "off"),
         "creative_beam_width": int(config.creative_beam_width if config else 0),
         "creative_max_hops": int(config.creative_max_hops if config else 0),
@@ -661,7 +730,63 @@ class BenchmarkWorkspaceManager:
         self.shared_cache_dir = shared_cache_dir
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self.shared_cache_dir.mkdir(parents=True, exist_ok=True)
-        self._workspaces: dict[str, BenchmarkWorkspace] = {}
+        self.keep_workspace_open = os.environ.get("SPHERE_BENCHMARK_KEEP_WORKSPACE_OPEN", "true").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        try:
+            self.max_open_workspaces = max(1, int(os.environ.get("SPHERE_BENCHMARK_MAX_OPEN_WORKSPACES", "1")))
+        except ValueError:
+            self.max_open_workspaces = 1
+        self._workspaces: OrderedDict[str, BenchmarkWorkspace] = OrderedDict()
+
+    def _reuse_diagnostics(
+        self,
+        *,
+        workspace: BenchmarkWorkspace,
+        reused_from_disk: bool,
+        reused_in_memory: bool,
+        ingest_lookup_ms: float,
+    ) -> dict[str, Any]:
+        return {
+            "workspace_reused": True,
+            "workspace_reused_from_disk": bool(reused_from_disk),
+            "workspace_reused_in_memory": bool(reused_in_memory),
+            "workspace_retention_enabled": bool(self.keep_workspace_open),
+            "workspace_retention_max_open": int(self.max_open_workspaces),
+            "cache_reuse_saved_ms": round(workspace.build_elapsed_ms, 2),
+            "ingest_lookup_ms": round(ingest_lookup_ms, 2),
+        }
+
+    def _evict_surplus(self, keep_signature: str | None = None, collect_garbage: bool = True) -> None:
+        if not self.keep_workspace_open:
+            return
+        evicted = False
+        while len(self._workspaces) > self.max_open_workspaces:
+            signature, workspace = self._workspaces.popitem(last=False)
+            if keep_signature is not None and signature == keep_signature:
+                self._workspaces[signature] = workspace
+                break
+            workspace.close()
+            evicted = True
+        if evicted and collect_garbage:
+            gc.collect()
+
+    def _acquire_build_lock(self, signature: str) -> Any:
+        lock_path = self.cache_root / f"{signature}.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock_path.open("a+")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        return handle
+
+    @staticmethod
+    def _release_build_lock(handle: Any) -> None:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
     def acquire(
         self,
@@ -671,63 +796,216 @@ class BenchmarkWorkspaceManager:
         shell: int,
         sector: str,
         zone: str,
+        benchmark_name: str,
+        adapter_version: str,
+        raw_counts: dict[str, Any] | None = None,
     ) -> tuple[BenchmarkWorkspace, dict[str, Any]]:
-        probe_config = AppConfig(base_dir=self.cache_root / "_probe", shared_cache_dir=self.shared_cache_dir)
+        probe_config = force_benchmark_config(
+            AppConfig(base_dir=self.cache_root / "_probe", shared_cache_dir=self.shared_cache_dir)
+        )
+        probe_runtime_fingerprint = build_runtime_fingerprint(
+            config=probe_config,
+            benchmark_name=benchmark_name,
+            adapter_version=adapter_version,
+            granularity=granularity,
+        )
         signature = build_workspace_signature(
             corpus_items=corpus_items,
             granularity=granularity,
             shell=shell,
             sector=sector,
             zone=zone,
+            benchmark_name=benchmark_name,
+            adapter_version=adapter_version,
+            runtime_fingerprint=probe_runtime_fingerprint,
             config=probe_config,
         )
         if signature in self._workspaces:
             workspace = self._workspaces[signature]
-            return workspace, {
-                "workspace_reused": True,
-                "workspace_reused_from_disk": False,
-                "cache_reuse_saved_ms": round(workspace.build_elapsed_ms, 2),
-                "ingest_lookup_ms": 0.0,
-            }
+            self._workspaces.move_to_end(signature)
+            return workspace, self._reuse_diagnostics(
+                workspace=workspace,
+                reused_from_disk=False,
+                reused_in_memory=True,
+                ingest_lookup_ms=0.0,
+            )
 
-        workspace_dir = self.cache_root / signature
-        manifest_path = workspace_dir / "workspace_manifest.json"
-        manifest: dict[str, Any] | None = None
-        lookup_start = perf_counter()
-        if manifest_path.exists():
-            try:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            except Exception:
-                manifest = None
-
-        manifest_valid = bool(
-            manifest
-            and manifest.get("signature") == signature
-            and manifest.get("cache_version") == BENCHMARK_WORKSPACE_CACHE_VERSION
-        )
-
-        if not manifest_valid and workspace_dir.exists():
-            shutil.rmtree(workspace_dir, ignore_errors=True)
-
-        config, storage, vector_store, writer, activation, router, reranker = build_services(
-            workspace_dir,
-            shared_cache_dir=self.shared_cache_dir,
-        )
-        pipeline = EvidencePipeline(storage, vector_store, activation, router, config=config)
-        if manifest_valid and manifest is not None:
-            expected_chunk_count = int((manifest.get("ingest_profile") or {}).get("counts", {}).get("chunks", 0))
-            if expected_chunk_count > 0 and vector_store.count() == 0:
-                manifest_valid = False
-                vector_store.close()
-                storage.close_persistent()
-                shutil.rmtree(workspace_dir, ignore_errors=True)
-                config, storage, vector_store, writer, activation, router, reranker = build_services(
-                    workspace_dir,
-                    shared_cache_dir=self.shared_cache_dir,
+        build_lock = self._acquire_build_lock(signature)
+        try:
+            if signature in self._workspaces:
+                workspace = self._workspaces[signature]
+                self._workspaces.move_to_end(signature)
+                return workspace, self._reuse_diagnostics(
+                    workspace=workspace,
+                    reused_from_disk=False,
+                    reused_in_memory=True,
+                    ingest_lookup_ms=0.0,
                 )
-                pipeline = EvidencePipeline(storage, vector_store, activation, router, config=config)
 
-        if manifest_valid and manifest is not None:
+            workspace_dir = self.cache_root / signature
+            manifest_path = workspace_dir / "workspace_manifest.json"
+            manifest: dict[str, Any] | None = None
+            lookup_start = perf_counter()
+            if manifest_path.exists():
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except Exception:
+                    manifest = None
+
+            manifest_valid = bool(
+                manifest
+                and manifest.get("signature") == signature
+                and manifest.get("cache_version") == BENCHMARK_WORKSPACE_CACHE_VERSION
+            )
+
+            if not manifest_valid and workspace_dir.exists():
+                shutil.rmtree(workspace_dir, ignore_errors=True)
+
+            config, storage, vector_store, writer, activation, router, reranker = build_services(
+                workspace_dir,
+                shared_cache_dir=self.shared_cache_dir,
+            )
+            runtime_fingerprint = build_runtime_fingerprint(
+                config=config,
+                benchmark_name=benchmark_name,
+                adapter_version=adapter_version,
+                granularity=granularity,
+                vector_info=vector_store.info(),
+            )
+            pipeline = EvidencePipeline(storage, vector_store, activation, router, config=config)
+            manifest_fingerprint = dict((manifest or {}).get("index_metadata", {}).get("fingerprint") or {})
+            if manifest_valid and manifest_fingerprint:
+                stable_fingerprint_match = all(
+                    manifest_fingerprint.get(key) == runtime_fingerprint.get(key)
+                    for key in (
+                        "embedding_provider",
+                        "embedding_model",
+                        "embedding_dim",
+                        "normalize_embeddings",
+                        "embedding_preprocess_version",
+                        "fallback_in_use",
+                        "vector_backend",
+                        "vector_fallback_in_use",
+                        "benchmark_adapter_version",
+                    )
+                ) and json.dumps(
+                    manifest_fingerprint.get("chunker") or {},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ) == json.dumps(
+                    runtime_fingerprint.get("chunker") or {},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if not stable_fingerprint_match:
+                    manifest_valid = False
+                    vector_store.close()
+                    storage.close_persistent()
+                    shutil.rmtree(workspace_dir, ignore_errors=True)
+                    config, storage, vector_store, writer, activation, router, reranker = build_services(
+                        workspace_dir,
+                        shared_cache_dir=self.shared_cache_dir,
+                    )
+                    runtime_fingerprint = build_runtime_fingerprint(
+                        config=config,
+                        benchmark_name=benchmark_name,
+                        adapter_version=adapter_version,
+                        granularity=granularity,
+                        vector_info=vector_store.info(),
+                    )
+                    pipeline = EvidencePipeline(storage, vector_store, activation, router, config=config)
+            if manifest_valid and manifest is not None:
+                expected_chunk_count = int((manifest.get("ingest_profile") or {}).get("counts", {}).get("chunks", 0))
+                if expected_chunk_count > 0 and vector_store.count() == 0:
+                    manifest_valid = False
+                    vector_store.close()
+                    storage.close_persistent()
+                    shutil.rmtree(workspace_dir, ignore_errors=True)
+                    config, storage, vector_store, writer, activation, router, reranker = build_services(
+                        workspace_dir,
+                        shared_cache_dir=self.shared_cache_dir,
+                    )
+                    runtime_fingerprint = build_runtime_fingerprint(
+                        config=config,
+                        benchmark_name=benchmark_name,
+                        adapter_version=adapter_version,
+                        granularity=granularity,
+                        vector_info=vector_store.info(),
+                    )
+                    pipeline = EvidencePipeline(storage, vector_store, activation, router, config=config)
+
+            if manifest_valid and manifest is not None:
+                loaded_index_metadata = dict(manifest.get("index_metadata") or {})
+                loaded_index_metadata["workspace_dir"] = str(workspace_dir)
+                assert_benchmark_vector_guard(
+                    vector_info=vector_store.info(),
+                    runtime_fingerprint=runtime_fingerprint,
+                    index_fingerprint=dict(loaded_index_metadata.get("fingerprint") or {}),
+                )
+                workspace = BenchmarkWorkspace(
+                    signature=signature,
+                    base_dir=workspace_dir,
+                    config=config,
+                    storage=storage,
+                    vector_store=vector_store,
+                    writer=writer,
+                    activation=activation,
+                    router=router,
+                    reranker=reranker,
+                    pipeline=pipeline,
+                    vector_info=vector_store.info(),
+                    ingest_profile=dict(manifest.get("ingest_profile") or {}),
+                    index_metadata=loaded_index_metadata,
+                    build_elapsed_ms=float(manifest.get("build_elapsed_ms") or 0.0),
+                    manifest_path=manifest_path,
+                )
+                self._workspaces[signature] = workspace
+                self._evict_surplus(keep_signature=signature)
+                return workspace, self._reuse_diagnostics(
+                    workspace=workspace,
+                    reused_from_disk=True,
+                    reused_in_memory=False,
+                    ingest_lookup_ms=(perf_counter() - lookup_start) * 1000.0,
+                )
+
+            build_start = perf_counter()
+            _, _, ingest_profile, index_metadata = ingest_corpus(
+                corpus_items,
+                storage=storage,
+                vector_store=vector_store,
+                writer=writer,
+                shell=shell,
+                sector=sector,
+                zone=zone,
+                question_type=question_type,
+                benchmark_name=benchmark_name,
+                adapter_version=adapter_version,
+                runtime_fingerprint=runtime_fingerprint,
+                raw_counts=raw_counts,
+            )
+            index_metadata["workspace_dir"] = str(workspace_dir)
+            assert_benchmark_vector_guard(
+                vector_info=vector_store.info(),
+                runtime_fingerprint=runtime_fingerprint,
+                index_fingerprint=dict(index_metadata.get("fingerprint") or {}),
+            )
+            build_elapsed_ms = round((perf_counter() - build_start) * 1000.0, 2)
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_payload = {
+                "signature": signature,
+                "cache_version": BENCHMARK_WORKSPACE_CACHE_VERSION,
+                "build_elapsed_ms": build_elapsed_ms,
+                "ingest_profile": ingest_profile,
+                "index_metadata": index_metadata,
+            }
+            tmp_manifest_path = manifest_path.with_suffix(".json.tmp")
+            tmp_manifest_path.write_text(
+                json.dumps(manifest_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            tmp_manifest_path.replace(manifest_path)
             workspace = BenchmarkWorkspace(
                 signature=signature,
                 base_dir=workspace_dir,
@@ -740,79 +1018,44 @@ class BenchmarkWorkspaceManager:
                 reranker=reranker,
                 pipeline=pipeline,
                 vector_info=vector_store.info(),
-                ingest_profile=dict(manifest.get("ingest_profile") or {}),
-                build_elapsed_ms=float(manifest.get("build_elapsed_ms") or 0.0),
+                ingest_profile=ingest_profile,
+                index_metadata=index_metadata,
+                build_elapsed_ms=build_elapsed_ms,
                 manifest_path=manifest_path,
             )
             self._workspaces[signature] = workspace
+            self._evict_surplus(keep_signature=signature)
             return workspace, {
-                "workspace_reused": True,
-                "workspace_reused_from_disk": True,
-                "cache_reuse_saved_ms": round(workspace.build_elapsed_ms, 2),
+                "workspace_reused": False,
+                "workspace_reused_from_disk": False,
+                "workspace_reused_in_memory": False,
+                "workspace_retention_enabled": bool(self.keep_workspace_open),
+                "workspace_retention_max_open": int(self.max_open_workspaces),
+                "cache_reuse_saved_ms": 0.0,
                 "ingest_lookup_ms": round((perf_counter() - lookup_start) * 1000.0, 2),
             }
-
-        build_start = perf_counter()
-        _, _, ingest_profile = ingest_corpus(
-            corpus_items,
-            storage=storage,
-            vector_store=vector_store,
-            writer=writer,
-            shell=shell,
-            sector=sector,
-            zone=zone,
-            question_type=question_type,
-        )
-        build_elapsed_ms = round((perf_counter() - build_start) * 1000.0, 2)
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        manifest_path.write_text(
-            json.dumps(
-                {
-                    "signature": signature,
-                    "cache_version": BENCHMARK_WORKSPACE_CACHE_VERSION,
-                    "build_elapsed_ms": build_elapsed_ms,
-                    "ingest_profile": ingest_profile,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        workspace = BenchmarkWorkspace(
-            signature=signature,
-            base_dir=workspace_dir,
-            config=config,
-            storage=storage,
-            vector_store=vector_store,
-            writer=writer,
-            activation=activation,
-            router=router,
-            reranker=reranker,
-            pipeline=pipeline,
-            vector_info=vector_store.info(),
-            ingest_profile=ingest_profile,
-            build_elapsed_ms=build_elapsed_ms,
-            manifest_path=manifest_path,
-        )
-        self._workspaces[signature] = workspace
-        return workspace, {
-            "workspace_reused": False,
-            "workspace_reused_from_disk": False,
-            "cache_reuse_saved_ms": 0.0,
-            "ingest_lookup_ms": round((perf_counter() - lookup_start) * 1000.0, 2),
-        }
+        finally:
+            self._release_build_lock(build_lock)
 
     def close_all(self) -> None:
         for workspace in self._workspaces.values():
             workspace.close()
+        self._workspaces.clear()
 
-    def release(self, signature: str) -> None:
+    def release(self, signature: str, collect_garbage: bool = True, force_close: bool = False) -> None:
+        if self.keep_workspace_open and not force_close:
+            workspace = self._workspaces.get(signature)
+            if workspace is not None:
+                self._workspaces.move_to_end(signature)
+                self._evict_surplus(keep_signature=signature, collect_garbage=collect_garbage)
+            return
         workspace = self._workspaces.pop(signature, None)
         if workspace is None:
             return
         workspace.close()
         del workspace
-        gc.collect()
+        if collect_garbage:
+            gc.collect()
 
 
 def rank_vector(
@@ -851,6 +1094,49 @@ def rank_vector(
         ranked_ids[: max(top_k, len(ordered_corpus_ids))],
         ranked[:top_k],
         {"vector_total_ms": round((perf_counter() - total_start) * 1000.0, 2)},
+    )
+
+
+def rank_bm25(
+    query: str,
+    storage: Storage,
+    ordered_corpus_ids: list[str],
+    corpus_by_node_id: dict[str, dict[str, Any]],
+    top_k: int,
+    chunk_pool: int,
+) -> tuple[list[str], list[dict[str, Any]], dict[str, float]]:
+    total_start = perf_counter()
+    raw_hits = storage.search_chunks_fts(query, limit=max(top_k, chunk_pool))
+    best_by_corpus_id: dict[str, dict[str, Any]] = {}
+    for hit in raw_hits:
+        node_id = str(hit.get("node_id") or "")
+        corpus_item = corpus_by_node_id.get(node_id)
+        if not corpus_item:
+            continue
+        corpus_id = str(corpus_item["corpus_id"])
+        raw_score = float(hit.get("bm25_score") or 0.0)
+        current = best_by_corpus_id.get(corpus_id)
+        if current is None or raw_score < float(current["raw_bm25_score"]):
+            best_by_corpus_id[corpus_id] = {
+                "corpus_id": corpus_id,
+                "raw_bm25_score": raw_score,
+                "score": -raw_score,
+                "text": corpus_item["text"],
+                "timestamp": corpus_item["timestamp"],
+            }
+
+    ranked = sorted(best_by_corpus_id.values(), key=lambda item: (float(item["raw_bm25_score"]), item["corpus_id"]))
+    ranked_ids = [item["corpus_id"] for item in ranked]
+    for corpus_id in ordered_corpus_ids:
+        if corpus_id not in best_by_corpus_id:
+            ranked_ids.append(corpus_id)
+    return (
+        ranked_ids[: max(top_k, len(ordered_corpus_ids))],
+        ranked[:top_k],
+        {
+            "bm25_total_ms": round((perf_counter() - total_start) * 1000.0, 2),
+            "lexical_ms": round((perf_counter() - total_start) * 1000.0, 2),
+        },
     )
 
 
@@ -1025,6 +1311,7 @@ def run_benchmark(
     support_top_k: int = 4,
     cognitive_top_k: int = 0,
 ) -> dict[str, Any]:
+    determinism = configure_benchmark_determinism()
     load_start = perf_counter()
     with data_file.open("r", encoding="utf-8") as handle:
         data = json.load(handle)
@@ -1045,7 +1332,13 @@ def run_benchmark(
     timing_metrics = defaultdict(list)
     profile_metrics: dict[str, list[float]] = defaultdict(list)
     results_log: list[dict[str, Any]] = []
+    candidate_diagnostics: list[dict[str, Any]] = []
+    oracle_rows: list[dict[str, Any]] = []
+    failure_rows: list[dict[str, Any]] = []
+    topk_debug_rows: list[dict[str, Any]] = []
     vector_info: dict[str, Any] | None = None
+    index_metadata: dict[str, Any] | None = None
+    runtime_fingerprint: dict[str, Any] | None = None
     runtime_config: dict[str, Any] | None = None
     start_time = datetime.now()
     totals_ms = {
@@ -1058,6 +1351,12 @@ def run_benchmark(
         "total_embedding_cache_hit_ms_saved": 0.0,
     }
     workspace_manager = BenchmarkWorkspaceManager(WORKSPACE_CACHE_ROOT, SHARED_EMBEDDING_CACHE_DIR)
+    all_gold_segment_ids: set[str] = set()
+    all_gold_document_ids: set[str] = set()
+    aggregate_raw_counts: dict[str, int] = defaultdict(int)
+    aggregate_chunk_metadata: dict[str, dict[str, Any]] = {}
+    aggregate_indexed_segment_ids: set[str] = set()
+    aggregate_indexed_doc_ids: set[str] = set()
 
     cross_encoder_model = None
     if use_cross_encoder:
@@ -1076,6 +1375,12 @@ def run_benchmark(
 
         ordered_corpus_ids = [str(item["corpus_id"]) for item in corpus_items]
         corpus_by_node_id = {f"bench_{item_index:04d}": item for item_index, item in enumerate(corpus_items)}
+        answer_session_ids = set(entry["answer_session_ids"])
+        raw_counts = build_raw_counts(
+            corpus_items,
+            question_count=1,
+            session_count=len({str(item.get("session_id") or item["corpus_id"]) for item in corpus_items}),
+        )
         question_profile: dict[str, Any] = {}
         retry_count = 0
         current_workspace_manager = workspace_manager
@@ -1088,6 +1393,9 @@ def run_benchmark(
                 shell=shell,
                 sector=sector,
                 zone=zone,
+                benchmark_name="longmemeval",
+                adapter_version=LONGMEMEVAL_ADAPTER_VERSION,
+                raw_counts=raw_counts,
             )
             acquire_total_ms = round((perf_counter() - stage_start) * 1000.0, 2)
             ingest_profile = workspace.ingest_profile
@@ -1100,6 +1408,23 @@ def run_benchmark(
             actual_ingest_profile = materialize_ingest_profile_for_question(workspace.ingest_profile, ingest_reuse)
             if vector_info is None:
                 vector_info = workspace.vector_info
+            if index_metadata is None:
+                index_metadata = workspace.index_metadata
+            if runtime_fingerprint is None:
+                runtime_fingerprint = build_runtime_fingerprint(
+                    config=workspace.config,
+                    benchmark_name="longmemeval",
+                    adapter_version=LONGMEMEVAL_ADAPTER_VERSION,
+                    granularity=granularity,
+                    vector_info=workspace.vector_info,
+                )
+            for key, value in dict((workspace.index_metadata or {}).get("raw_counts") or {}).items():
+                if isinstance(value, (int, float)):
+                    aggregate_raw_counts[key] += int(value)
+            aggregate_indexed_segment_ids.update(set((workspace.index_metadata or {}).get("indexed_segment_ids") or []))
+            aggregate_indexed_doc_ids.update(set((workspace.index_metadata or {}).get("indexed_doc_ids") or []))
+            for chunk_id, meta in dict((workspace.index_metadata or {}).get("chunk_metadata_by_id") or {}).items():
+                aggregate_chunk_metadata[f"{workspace.signature}:{chunk_id}"] = dict(meta)
             if runtime_config is None:
                 runtime_config = {
                     "embedding_model": workspace.config.embedding_model_name,
@@ -1109,6 +1434,7 @@ def run_benchmark(
                     "cross_encoder_requested": bool(use_cross_encoder),
                     "cross_encoder_loaded": bool(cross_encoder_model is not None),
                     "creative_mode": workspace.config.creative_mode_name,
+                    "enable_benchmark_route_tuning": bool(workspace.config.enable_benchmark_route_tuning),
                     "creative_beam_width": int(workspace.config.creative_beam_width),
                     "creative_max_hops": int(workspace.config.creative_max_hops),
                     "creative_neighbors_per_hop": int(workspace.config.creative_neighbors_per_hop),
@@ -1127,20 +1453,82 @@ def run_benchmark(
                         chunk_pool=chunk_pool,
                     )
                     question_profile = {"ingest": actual_ingest_profile, "ingest_cached": workspace.ingest_profile, "reuse": ingest_reuse}
-                elif mode == "evidence":
-                    ranked_ids, ranked_items, stage_timing_ms, evidence_profile = rank_evidence(
+                elif mode == "bm25":
+                    ranked_ids, ranked_items, stage_timing_ms = rank_bm25(
                         entry["question"],
-                        pipeline=workspace.pipeline,
+                        storage=workspace.storage,
                         ordered_corpus_ids=ordered_corpus_ids,
                         corpus_by_node_id=corpus_by_node_id,
-                        task_type=task_type,
                         top_k=top_k,
-                        object_top_k=object_top_k,
-                        support_top_k=support_top_k,
-                        cognitive_top_k=cognitive_top_k,
-                        route_context=build_route_context(entry),
+                        chunk_pool=chunk_pool,
                     )
-                    question_profile = {"ingest": actual_ingest_profile, "ingest_cached": workspace.ingest_profile, "pipeline": evidence_profile, "reuse": ingest_reuse}
+                    question_profile = {"ingest": actual_ingest_profile, "ingest_cached": workspace.ingest_profile, "reuse": ingest_reuse}
+                elif mode == "evidence":
+                    evidence_stage_start = perf_counter()
+                    route_context = build_route_context(entry)
+                    hybrid_trace = rank_benchmark_sources(
+                        query=entry["question"],
+                        benchmark_name="longmemeval",
+                        vector_store=workspace.vector_store,
+                        storage=workspace.storage,
+                        index_metadata=workspace.index_metadata,
+                        config=workspace.config,
+                        route_context=route_context,
+                        pool_limit=max(200, top_k * 4),
+                    )
+                    final_source_rows = candidate_rows(hybrid_trace["final_candidates"], limit=max(200, top_k * 4))
+                    ranked_ids = [str(row.get("source_id") or "") for row in final_source_rows]
+                    ranked_items = [
+                        {
+                            "corpus_id": str(row.get("source_id") or ""),
+                            "score": float(row.get("post_inhibition_score") or row.get("rerank_score") or 0.0),
+                            "text": str(row.get("preview") or ""),
+                            "timestamp": str(row.get("timestamp") or ""),
+                        }
+                        for row in final_source_rows[:top_k]
+                    ]
+                    stage_timing_ms = {
+                        "total_ms": round((perf_counter() - evidence_stage_start) * 1000.0, 2),
+                        **dict(hybrid_trace.get("timings_ms") or {}),
+                    }
+                    evidence_profile = {
+                        "retrieval": {
+                            "candidate_counts": {
+                                **hybrid_trace["candidate_source_stats"],
+                                "final_evidence": len(final_source_rows),
+                            },
+                            "ranking": {
+                                "broad_top_candidates": candidate_rows(hybrid_trace["broad_candidates"], limit=100),
+                                "reranked_top_candidates": candidate_rows(hybrid_trace["reranked_candidates"], limit=100),
+                                "final_top_candidates": final_source_rows[:100],
+                            },
+                            "selection": {
+                                "fusion_audit": dict(hybrid_trace.get("fusion_audit") or {}),
+                                "inhibition_audit": dict(hybrid_trace.get("inhibition_audit") or {}),
+                            },
+                            "query_features": dict(hybrid_trace.get("query_features") or {}),
+                            "query_decomposition": dict(hybrid_trace.get("query_decomposition") or {}),
+                            "channel_stats": dict(hybrid_trace.get("channel_stats") or {}),
+                            "timings_ms": dict(stage_timing_ms),
+                        },
+                        "completion": {"candidate_counts": {}, "timings_ms": {"total_ms": 0.0}},
+                        "cognitive": {
+                            "candidate_counts": {
+                                "evidence_nodes": len(final_source_rows),
+                                "relevant_experience": 0,
+                                "creative_reflections": 0,
+                                "alternative_paths": 0,
+                            },
+                            "decisions": {"executed": False, "reason": "benchmark_mode_creative_disabled"},
+                            "timings_ms": {"total_ms": 0.0, "prism_total_ms": 0.0},
+                        },
+                    }
+                    question_profile = {
+                        "ingest": actual_ingest_profile,
+                        "ingest_cached": workspace.ingest_profile,
+                        "pipeline": evidence_profile,
+                        "reuse": ingest_reuse,
+                    }
                 elif mode == "activation":
                     ranked_ids, ranked_items, stage_timing_ms = rank_hybrid(
                         entry["question"],
@@ -1173,7 +1561,7 @@ def run_benchmark(
                     question_profile["retry_count"] = retry_count
                 break
             except Exception as exc:
-                current_workspace_manager.release(workspace.signature)
+                current_workspace_manager.release(workspace.signature, force_close=True)
                 lowered = str(exc).lower()
                 retryable = "nothing found on disk" in lowered or "creating hnsw segment reader" in lowered
                 if not retryable or retry_count >= 2:
@@ -1223,9 +1611,22 @@ def run_benchmark(
         totals_ms["total_cache_reuse_saved_ms"] += float(question_summary.get("cache_reuse_saved_ms", 0.0))
         totals_ms["total_embedding_cache_hit_ms_saved"] += float(question_summary.get("embedding_cache_hit_ms_saved", 0.0))
 
-        answer_session_ids = set(entry["answer_session_ids"])
+        all_gold_segment_ids.update(answer_session_ids)
+        all_gold_document_ids.update(answer_session_ids)
         session_level_ids = [session_id_from_corpus_id(corpus_id) for corpus_id in ranked_ids]
         turn_correct = {corpus_id for corpus_id in ranked_ids if session_id_from_corpus_id(corpus_id) in answer_session_ids}
+        broad_rows = []
+        reranked_rows = []
+        final_rows = []
+        if mode == "evidence":
+            ranking_payload = dict((question_profile.get("pipeline") or {}).get("retrieval", {}).get("ranking") or {})
+            broad_rows = list(ranking_payload.get("broad_top_candidates") or [])
+            reranked_rows = list(ranking_payload.get("reranked_top_candidates") or [])
+            final_rows = list(ranking_payload.get("final_top_candidates") or [])
+            if granularity != "session":
+                broad_rows = remap_rank_rows(broad_rows, session_id_from_corpus_id)
+                reranked_rows = remap_rank_rows(reranked_rows, session_id_from_corpus_id)
+                final_rows = remap_rank_rows(final_rows, session_id_from_corpus_id)
 
         entry_metrics = {"session": {}, "turn": {}}
         for k in KS:
@@ -1247,6 +1648,69 @@ def run_benchmark(
         per_type[qtype]["recall_any@5"].append(entry_metrics["session"]["recall_any@5"])
         per_type[qtype]["recall_any@10"].append(entry_metrics["session"]["recall_any@10"])
         per_type[qtype]["ndcg_any@10"].append(entry_metrics["session"]["ndcg_any@10"])
+        if mode == "evidence":
+            query_diag = build_query_diagnostic(
+                benchmark_name="longmemeval",
+                query_id=entry["question_id"],
+                query_text=entry["question"],
+                answer_text=entry["answer"],
+                gold_segment_ids=answer_session_ids,
+                gold_evidence_ids=answer_session_ids,
+                broad_rows=broad_rows,
+                reranked_rows=reranked_rows,
+                final_rows=final_rows,
+                trace=hybrid_trace,
+                index_metadata=workspace.index_metadata,
+            )
+            failure_row = build_query_failure(
+                benchmark_name="longmemeval",
+                query_id=entry["question_id"],
+                query_text=entry["question"],
+                answer_text=entry["answer"],
+                gold_segment_ids=answer_session_ids,
+                gold_evidence_ids=answer_session_ids,
+                broad_rows=broad_rows,
+                reranked_rows=reranked_rows,
+                final_rows=final_rows,
+                index_metadata=workspace.index_metadata,
+                trace=hybrid_trace,
+            )
+            if failure_row is not None:
+                query_diag["failure_type"] = str(failure_row.get("failure_type") or "unknown")
+                failure_rows.append(failure_row)
+            topk_debug_rows.append(
+                build_topk_debug_record(
+                    benchmark_name="longmemeval",
+                    query_id=entry["question_id"],
+                    query_text=entry["question"],
+                    answer_text=entry["answer"],
+                    gold_segment_ids=answer_session_ids,
+                    failure_type=str(query_diag.get("failure_type") or "ok"),
+                    broad_rows=broad_rows,
+                    reranked_rows=reranked_rows,
+                    final_rows=final_rows,
+                    trace=hybrid_trace,
+                )
+            )
+            candidate_diagnostics.append(query_diag)
+            oracle_report_for_query = build_oracle_retrieval_report(
+                benchmark_name="longmemeval",
+                oracle_items=[
+                    {
+                        "query_id": entry["question_id"],
+                        "sample_id": entry["question_id"],
+                        "question_type": entry["question_type"],
+                        "gold_segment_ids": answer_session_ids,
+                        "route_context": build_route_context(entry),
+                    }
+                ],
+                vector_store=workspace.vector_store,
+                storage=workspace.storage,
+                index_metadata=workspace.index_metadata,
+                config=workspace.config,
+                pool_limit=50,
+            )
+            oracle_rows.extend(oracle_report_for_query["rows"])
 
         results_log.append(
             {
@@ -1259,6 +1723,7 @@ def run_benchmark(
                 "stage_timing_ms": stage_timing_ms,
                 "profiling": question_profile,
                 "ranked_items": ranked_items,
+                "candidate_recall": candidate_diagnostics[-1] if mode == "evidence" and candidate_diagnostics else None,
             }
         )
 
@@ -1360,6 +1825,101 @@ def run_benchmark(
         "bottlenecks": bottlenecks[:12],
         "results": results_log,
     }
+    aggregate_index_metadata = {
+        "benchmark_name": "longmemeval",
+        "fingerprint": dict(index_metadata.get("fingerprint") if index_metadata else runtime_fingerprint or {}),
+        "index_built_at": str(index_metadata.get("index_built_at") if index_metadata else ""),
+        "raw_counts": dict(aggregate_raw_counts),
+        "index_doc_count": len(aggregate_indexed_doc_ids),
+        "chunk_count": len(aggregate_chunk_metadata),
+        "unique_segment_count": len(aggregate_indexed_segment_ids),
+        "indexed_doc_ids": sorted(aggregate_indexed_doc_ids),
+        "indexed_segment_ids": sorted(aggregate_indexed_segment_ids),
+        "chunk_metadata_by_id": aggregate_chunk_metadata,
+    }
+    if vector_info is None:
+        vector_info = {}
+    if index_metadata is None:
+        index_metadata = aggregate_index_metadata
+    if runtime_fingerprint is None:
+        runtime_fingerprint = {}
+    payload.update(
+        build_result_metadata(
+            project_root=ROOT.parent,
+            benchmark_name="longmemeval",
+            question_count=len(results_log),
+            vector_info=vector_info,
+            index_metadata=aggregate_index_metadata,
+            runtime_fingerprint=runtime_fingerprint,
+            determinism=determinism,
+        )
+    )
+    if mode == "evidence":
+        reports_dir = report_root(out_file, "longmemeval")
+        integrity_path = reports_dir / "integrity" / "longmemeval_integrity_report.json"
+        candidate_path = reports_dir / "diagnostics" / "longmemeval_candidate_recall.json"
+        oracle_path = reports_dir / "diagnostics" / "longmemeval_oracle_retrieval.json"
+        channel_path = reports_dir / "diagnostics" / "longmemeval_channel_contribution.json"
+        performance_path = reports_dir / "diagnostics" / "longmemeval_performance_cache.json"
+        failure_path = reports_dir / "failures" / "longmemeval_failures.jsonl"
+        topk_debug_path = reports_dir / "debug" / "longmemeval_topk_debug.jsonl"
+        integrity_report = build_integrity_report(
+            benchmark_name="longmemeval",
+            raw_counts=dict(aggregate_index_metadata.get("raw_counts") or {}),
+            index_metadata=aggregate_index_metadata,
+            gold_segment_ids=all_gold_segment_ids,
+            gold_document_ids=all_gold_document_ids,
+        )
+        candidate_report = build_candidate_recall_summary(
+            benchmark_name="longmemeval",
+            rows=candidate_diagnostics,
+        )
+        oracle_report = {
+            "benchmark_name": "longmemeval",
+            "oracle_query_count": len(oracle_rows),
+            "oracle_recall@1": round(sum(1.0 for row in oracle_rows if row.get("top1_hit")) / max(1, len(oracle_rows)), 4),
+            "oracle_recall@5": round(sum(1.0 for row in oracle_rows if row.get("top5_hit")) / max(1, len(oracle_rows)), 4),
+            "oracle_recall@10": round(sum(1.0 for row in oracle_rows if row.get("top10_hit")) / max(1, len(oracle_rows)), 4),
+            "rows": oracle_rows,
+        }
+        channel_report = build_per_channel_contribution_report(
+            benchmark_name="longmemeval",
+            rows=candidate_diagnostics,
+        )
+        performance_report = build_performance_cache_report(
+            benchmark_name="longmemeval",
+            timing_summary=timing_summary,
+            reuse_summary=dict(payload.get("reuse_summary") or {}),
+            runtime_config=runtime_config,
+        )
+        write_json(integrity_path, integrity_report)
+        write_json(candidate_path, candidate_report)
+        write_json(oracle_path, oracle_report)
+        write_json(channel_path, channel_report)
+        write_json(performance_path, performance_report)
+        write_jsonl(failure_path, failure_rows)
+        write_jsonl(topk_debug_path, topk_debug_rows)
+        payload["reports"] = {
+            "integrity": str(integrity_path),
+            "candidate_recall": str(candidate_path),
+            "oracle_retrieval": str(oracle_path),
+            "channel_contribution": str(channel_path),
+            "performance_cache": str(performance_path),
+            "failures": str(failure_path),
+            "topk_debug": str(topk_debug_path),
+        }
+        payload["integrity_report"] = integrity_report
+        payload["candidate_recall_report"] = {
+            key: value
+            for key, value in candidate_report.items()
+            if key != "failures"
+        }
+        payload["oracle_retrieval_report"] = {
+            key: value for key, value in oracle_report.items() if key != "rows"
+        }
+        payload["channel_contribution_report"] = channel_report
+        payload["performance_cache_report"] = performance_report
+        payload["failure_summary"] = dict(candidate_report.get("failure_type_distribution") or {})
 
     print("\nSummary")
     print(f"  Questions:   {payload['question_count']}")
@@ -1404,7 +1964,7 @@ def run_benchmark(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark Sphere Memory CLI with LongMemEval.")
     parser.add_argument("data_file", type=Path, help="Path to longmemeval_s_cleaned.json")
-    parser.add_argument("--mode", choices=["vector", "evidence", "activation", "hybrid"], default="evidence")
+    parser.add_argument("--mode", choices=["vector", "bm25", "evidence", "activation", "hybrid"], default="evidence")
     parser.add_argument("--granularity", choices=["session", "turn"], default="session")
     parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--limit", type=int, default=0, help="Run only the first N questions")
@@ -1419,6 +1979,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--support-top-k", type=int, default=4, help="Number of supporting context chunks to expand for profiling/completion.")
     parser.add_argument("--cognitive-top-k", type=int, default=0, help="Optional cognitive expansion budget for profiling.")
     parser.add_argument("--out", type=Path, default=None)
+    add_token_economy_args(parser)
     return parser.parse_args()
 
 
@@ -1449,6 +2010,20 @@ def main() -> None:
         support_top_k=args.support_top_k,
         cognitive_top_k=args.cognitive_top_k,
     )
+    if args.record_token_economy:
+        record_token_economy_for_metrics(
+            metrics_path=out_file,
+            output_dir=args.token_economy_output,
+            tokenizer_model=args.tokenizer_model,
+            baseline_types=args.token_economy_baseline_types,
+            modes=args.token_economy_modes,
+            context_token_budget=args.context_token_budget,
+            recent_k=args.recent_k,
+            low_saving_threshold=args.low_saving_threshold,
+            quality_drop_threshold=args.quality_drop_threshold,
+            evidence_bloat_threshold=args.evidence_bloat_threshold,
+            metadata_bloat_threshold=args.metadata_bloat_threshold,
+        )
 
 
 if __name__ == "__main__":

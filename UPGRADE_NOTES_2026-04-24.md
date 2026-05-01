@@ -63,7 +63,7 @@ Full LongMemEval / LoCoMo / KnowMe / CloneMem numbers were not produced because 
 
 ```bash
 export SPHERE_EMBEDDING_FAIL_FAST=1
-export SPHERE_ENABLE_BENCHMARK_ROUTE_TUNING=0
+export SPHERE_ENABLE_BENCHMARK_ROUTE_TUNING=1
 export SPHERE_ENABLE_LIGHTWEIGHT_EDGE_WRITEBACK=1
 export PYTHONPATH="$(pwd)/base"
 python base/benchmarks/run_all_benchmarks.py --data-root /path/to/benchmark_data --out benchmark_runs/2026-04-24-current
@@ -74,4 +74,3 @@ If using the overlay package:
 ```bash
 export PYTHONPATH="$(pwd)/overlay:$(pwd)/base"
 ```
-

@@ -29,6 +29,9 @@ class AppConfig:
     object_collection_name: str = "memory_objects"
     proxy_collection_name: str = "retrieval_proxies"
     vector_backend: str = "auto"
+    json_vector_max_items: int = 5000
+    vector_fail_fast_on_fallback: bool = False
+    warn_on_json_vector_backend: bool = True
     embedding_dim: int = 384
     embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_fail_fast: bool = False
@@ -50,6 +53,98 @@ class AppConfig:
     enable_temporal_prefilter: bool = True
     retrieval_topk_coarse: int = 24
     retrieval_topk_fine: int = 8
+    multi_channel_enabled: bool = True
+    dense_channel_enabled: bool = True
+    dense_top_k: int = 200
+    lexical_channel_enabled: bool = True
+    lexical_top_k: int = 200
+    entity_channel_enabled: bool = True
+    entity_top_k: int = 150
+    temporal_channel_enabled: bool = True
+    temporal_top_k: int = 80
+    exact_phrase_channel_enabled: bool = True
+    exact_phrase_top_k: int = 80
+    temporal_neighbor_enabled: bool = True
+    max_neighbors_per_seed: int = 3
+    max_total_neighbor_candidates: int = 100
+    parent_session_enabled: bool = True
+    parent_top_k: int = 50
+    parent_expand_segments: int = 8
+    parent_anchor_noise_filter_enabled: bool = True
+    parent_supplemental_anchor_expansion_enabled: bool = False
+    parent_supplemental_anchor_expansion_cap: int = 2
+    clonemem_parent_timestamp_sibling_expansion_enabled: bool = False
+    clonemem_parent_timestamp_sibling_expansion_cap: int = 2
+    clonemem_parent_anchor_strict_noise_filter_enabled: bool = False
+    query_decomposition_enabled: bool = True
+    query_decomposition_top_k: int = 100
+    profile_side_index_enabled: bool = True
+    profile_side_index_top_k: int = 100
+    session_bundle_enabled: bool = True
+    session_bundle_top_k: int = 60
+    fusion_method: str = "rrf"
+    rrf_k: int = 60
+    final_candidate_pool_size: int = 300
+    safe_fusion_enabled: bool = True
+    dense_preserve_enabled: bool = True
+    dense_anchor_top_k: int = 100
+    dense_anchor_min_keep: int = 80
+    dense_gold_agnostic_rank_floor_enabled: bool = True
+    clonemem_dense_anchor_rerank_guard_enabled: bool = False
+    clonemem_dense_anchor_rerank_guard_max_rank: int = 10
+    clonemem_dense_anchor_rerank_guard_min_dense: float = 0.52
+    clonemem_dense_anchor_rerank_guard_min_support: int = 2
+    clonemem_dense_anchor_rerank_guard_floor: float = 0.72
+    clonemem_evidence_blend_rerank_enabled: bool = False
+    clonemem_evidence_blend_rerank_alpha: float = 0.35
+    clonemem_evidence_blend_min_broad_rank: int = 6
+    clonemem_evidence_blend_max_broad_rank: int = 20
+    clonemem_evidence_rank_preservation_enabled: bool = False
+    clonemem_evidence_rank_preservation_max_rank: int = 20
+    clonemem_evidence_rank_preservation_min_support: int = 5
+    clonemem_evidence_rank_preservation_min_broad_score: float = 0.65
+    clonemem_evidence_rank_preservation_floor: float = 0.68
+    clonemem_evidence_rank_preservation_protected_top_k: int = 3
+    clonemem_lexical_anchor_gate_enabled: bool = False
+    clonemem_lexical_anchor_gate_factor: float = 0.35
+    clonemem_lexical_anchor_gate_min_support: int = 2
+    clonemem_lexical_anchor_gate_min_anchor_score: float = 0.24
+    clonemem_lexical_anchor_gate_protected_top_k: int = 0
+    clonemem_channel_tail_rescue_enabled: bool = False
+    clonemem_channel_tail_rescue_max_rank: int = 180
+    clonemem_channel_tail_rescue_per_channel: int = 2
+    clonemem_channel_tail_rescue_target_rank: int = 90
+    clonemem_evidence_consensus_admission_enabled: bool = False
+    clonemem_evidence_consensus_admission_max_candidates: int = 4
+    clonemem_evidence_consensus_admission_min_channels: int = 2
+    clonemem_evidence_consensus_admission_target_rank: int = 88
+    channel_gating_enabled: bool = True
+    destructive_filter_guard_enabled: bool = True
+    duplicate_collapse_safe_mode: bool = True
+    parent_cap_after_gold_agnostic_anchor: bool = True
+    inhibition_apply_after_candidate_recall_pool: bool = True
+    fusion_debug_enabled: bool = True
+    duplicate_collapse_enabled: bool = True
+    near_duplicate_collapse_enabled: bool = True
+    competition_inhibition_enabled: bool = True
+    max_candidates_per_parent: int = 20
+    min_parent_diversity: int = 5
+    candidate_recall_eval_k: int = 100
+    route_aware_gating_enabled: bool = True
+    route_aware_gating_aggressiveness: str = "safe"
+    retrieval_early_exit_enabled: bool = True
+    retrieval_latency_budget_ms: int = 0
+    runtime_retrieval_latency_budget_ms: int = 0
+    runtime_parallel_channels_enabled: bool = False
+    retrieval_min_seed_candidates: int = 80
+    retrieval_confidence_margin: float = 0.12
+    clone_failure_taxonomy_enabled: bool = True
+    knowme_category_analysis_enabled: bool = True
+    per_channel_oracle_enabled: bool = True
+    write_debug_examples: bool = True
+    max_debug_examples_per_failure_type: int = 20
+    embedding_required_provider: str = "sentence_transformer"
+    embedding_required_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     enable_seed_clustering: bool = True
     enable_semantic_dedup: bool = True
     enable_conditional_rerank: bool = True
@@ -160,12 +255,146 @@ class AppConfig:
             mode=normalize_mode(env.get("SPHERE_MODE", "balanced")),
             proxy_collection_name=env.get("SPHERE_PROXY_COLLECTION_NAME", "retrieval_proxies"),
             vector_backend=env.get("SPHERE_VECTOR_BACKEND", "auto").strip().lower() or "auto",
+            json_vector_max_items=_env_int("SPHERE_JSON_VECTOR_MAX_ITEMS", 5000),
+            vector_fail_fast_on_fallback=_env_bool("SPHERE_VECTOR_FAIL_FAST_ON_FALLBACK", False),
+            warn_on_json_vector_backend=_env_bool("SPHERE_WARN_ON_JSON_VECTOR_BACKEND", True),
             embedding_fail_fast=_env_bool("SPHERE_EMBEDDING_FAIL_FAST", False),
             enable_task_router=_env_bool("SPHERE_ENABLE_TASK_ROUTER", True),
             enable_object_shortcut=_env_bool("SPHERE_ENABLE_OBJECT_SHORTCUT", True),
             enable_temporal_prefilter=_env_bool("SPHERE_ENABLE_TEMPORAL_PREFILTER", True),
             retrieval_topk_coarse=_env_int("SPHERE_RETRIEVAL_TOPK_COARSE", 24),
             retrieval_topk_fine=_env_int("SPHERE_RETRIEVAL_TOPK_FINE", 8),
+            multi_channel_enabled=_env_bool("SPHERE_MULTI_CHANNEL_ENABLED", True),
+            dense_channel_enabled=_env_bool("SPHERE_DENSE_CHANNEL_ENABLED", True),
+            dense_top_k=_env_int("SPHERE_DENSE_TOP_K", 200),
+            lexical_channel_enabled=_env_bool("SPHERE_LEXICAL_CHANNEL_ENABLED", True),
+            lexical_top_k=_env_int("SPHERE_LEXICAL_TOP_K", 200),
+            entity_channel_enabled=_env_bool("SPHERE_ENTITY_CHANNEL_ENABLED", True),
+            entity_top_k=_env_int("SPHERE_ENTITY_TOP_K", 150),
+            temporal_channel_enabled=_env_bool("SPHERE_TEMPORAL_CHANNEL_ENABLED", True),
+            temporal_top_k=_env_int("SPHERE_TEMPORAL_TOP_K", 80),
+            exact_phrase_channel_enabled=_env_bool("SPHERE_EXACT_PHRASE_CHANNEL_ENABLED", True),
+            exact_phrase_top_k=_env_int("SPHERE_EXACT_PHRASE_TOP_K", 80),
+            temporal_neighbor_enabled=_env_bool("SPHERE_TEMPORAL_NEIGHBOR_ENABLED", True),
+            max_neighbors_per_seed=_env_int("SPHERE_MAX_NEIGHBORS_PER_SEED", 3),
+            max_total_neighbor_candidates=_env_int("SPHERE_MAX_TOTAL_NEIGHBOR_CANDIDATES", 100),
+            parent_session_enabled=_env_bool("SPHERE_PARENT_SESSION_ENABLED", True),
+            parent_top_k=_env_int("SPHERE_PARENT_TOP_K", 50),
+            parent_expand_segments=_env_int("SPHERE_PARENT_EXPAND_SEGMENTS", 8),
+            parent_anchor_noise_filter_enabled=_env_bool("SPHERE_PARENT_ANCHOR_NOISE_FILTER_ENABLED", True),
+            parent_supplemental_anchor_expansion_enabled=_env_bool("SPHERE_PARENT_SUPPLEMENTAL_ANCHOR_EXPANSION_ENABLED", False),
+            parent_supplemental_anchor_expansion_cap=_env_int("SPHERE_PARENT_SUPPLEMENTAL_ANCHOR_EXPANSION_CAP", 2),
+            clonemem_parent_timestamp_sibling_expansion_enabled=_env_bool(
+                "SPHERE_CLONEMEM_PARENT_TIMESTAMP_SIBLING_EXPANSION_ENABLED",
+                False,
+            ),
+            clonemem_parent_timestamp_sibling_expansion_cap=_env_int(
+                "SPHERE_CLONEMEM_PARENT_TIMESTAMP_SIBLING_EXPANSION_CAP",
+                2,
+            ),
+            clonemem_parent_anchor_strict_noise_filter_enabled=_env_bool(
+                "SPHERE_CLONEMEM_PARENT_ANCHOR_STRICT_NOISE_FILTER_ENABLED",
+                False,
+            ),
+            query_decomposition_enabled=_env_bool("SPHERE_QUERY_DECOMPOSITION_ENABLED", True),
+            query_decomposition_top_k=_env_int("SPHERE_QUERY_DECOMPOSITION_TOP_K", 100),
+            profile_side_index_enabled=_env_bool("SPHERE_PROFILE_SIDE_INDEX_ENABLED", True),
+            profile_side_index_top_k=_env_int("SPHERE_PROFILE_SIDE_INDEX_TOP_K", 100),
+            session_bundle_enabled=_env_bool("SPHERE_SESSION_BUNDLE_ENABLED", True),
+            session_bundle_top_k=_env_int("SPHERE_SESSION_BUNDLE_TOP_K", 60),
+            fusion_method=(env.get("SPHERE_FUSION_METHOD", "rrf").strip().lower() or "rrf"),
+            rrf_k=_env_int("SPHERE_RRF_K", 60),
+            final_candidate_pool_size=_env_int("SPHERE_FINAL_CANDIDATE_POOL_SIZE", 300),
+            safe_fusion_enabled=_env_bool("SPHERE_SAFE_FUSION_ENABLED", True),
+            dense_preserve_enabled=_env_bool("SPHERE_DENSE_PRESERVE_ENABLED", True),
+            dense_anchor_top_k=_env_int("SPHERE_DENSE_ANCHOR_TOP_K", 100),
+            dense_anchor_min_keep=_env_int("SPHERE_DENSE_ANCHOR_MIN_KEEP", 80),
+            dense_gold_agnostic_rank_floor_enabled=_env_bool("SPHERE_DENSE_GOLD_AGNOSTIC_RANK_FLOOR_ENABLED", True),
+            clonemem_dense_anchor_rerank_guard_enabled=_env_bool("SPHERE_CLONEMEM_DENSE_ANCHOR_RERANK_GUARD_ENABLED", False),
+            clonemem_dense_anchor_rerank_guard_max_rank=_env_int("SPHERE_CLONEMEM_DENSE_ANCHOR_RERANK_GUARD_MAX_RANK", 10),
+            clonemem_dense_anchor_rerank_guard_min_dense=_env_float("SPHERE_CLONEMEM_DENSE_ANCHOR_RERANK_GUARD_MIN_DENSE", 0.52),
+            clonemem_dense_anchor_rerank_guard_min_support=_env_int("SPHERE_CLONEMEM_DENSE_ANCHOR_RERANK_GUARD_MIN_SUPPORT", 2),
+            clonemem_dense_anchor_rerank_guard_floor=_env_float("SPHERE_CLONEMEM_DENSE_ANCHOR_RERANK_GUARD_FLOOR", 0.72),
+            clonemem_evidence_blend_rerank_enabled=_env_bool("SPHERE_CLONEMEM_EVIDENCE_BLEND_RERANK_ENABLED", False),
+            clonemem_evidence_blend_rerank_alpha=_env_float("SPHERE_CLONEMEM_EVIDENCE_BLEND_RERANK_ALPHA", 0.35),
+            clonemem_evidence_blend_min_broad_rank=_env_int("SPHERE_CLONEMEM_EVIDENCE_BLEND_MIN_BROAD_RANK", 6),
+            clonemem_evidence_blend_max_broad_rank=_env_int("SPHERE_CLONEMEM_EVIDENCE_BLEND_MAX_BROAD_RANK", 20),
+            clonemem_evidence_rank_preservation_enabled=_env_bool(
+                "SPHERE_CLONEMEM_EVIDENCE_RANK_PRESERVATION_ENABLED",
+                False,
+            ),
+            clonemem_evidence_rank_preservation_max_rank=_env_int(
+                "SPHERE_CLONEMEM_EVIDENCE_RANK_PRESERVATION_MAX_RANK",
+                20,
+            ),
+            clonemem_evidence_rank_preservation_min_support=_env_int(
+                "SPHERE_CLONEMEM_EVIDENCE_RANK_PRESERVATION_MIN_SUPPORT",
+                5,
+            ),
+            clonemem_evidence_rank_preservation_min_broad_score=_env_float(
+                "SPHERE_CLONEMEM_EVIDENCE_RANK_PRESERVATION_MIN_BROAD_SCORE",
+                0.65,
+            ),
+            clonemem_evidence_rank_preservation_floor=_env_float(
+                "SPHERE_CLONEMEM_EVIDENCE_RANK_PRESERVATION_FLOOR",
+                0.68,
+            ),
+            clonemem_evidence_rank_preservation_protected_top_k=_env_int(
+                "SPHERE_CLONEMEM_EVIDENCE_RANK_PRESERVATION_PROTECTED_TOP_K",
+                3,
+            ),
+            clonemem_lexical_anchor_gate_enabled=_env_bool("SPHERE_CLONEMEM_LEXICAL_ANCHOR_GATE_ENABLED", False),
+            clonemem_lexical_anchor_gate_factor=_env_float("SPHERE_CLONEMEM_LEXICAL_ANCHOR_GATE_FACTOR", 0.35),
+            clonemem_lexical_anchor_gate_min_support=_env_int("SPHERE_CLONEMEM_LEXICAL_ANCHOR_GATE_MIN_SUPPORT", 2),
+            clonemem_lexical_anchor_gate_min_anchor_score=_env_float("SPHERE_CLONEMEM_LEXICAL_ANCHOR_GATE_MIN_ANCHOR_SCORE", 0.24),
+            clonemem_lexical_anchor_gate_protected_top_k=_env_int("SPHERE_CLONEMEM_LEXICAL_ANCHOR_GATE_PROTECTED_TOP_K", 0),
+            clonemem_channel_tail_rescue_enabled=_env_bool("SPHERE_CLONEMEM_CHANNEL_TAIL_RESCUE_ENABLED", False),
+            clonemem_channel_tail_rescue_max_rank=_env_int("SPHERE_CLONEMEM_CHANNEL_TAIL_RESCUE_MAX_RANK", 180),
+            clonemem_channel_tail_rescue_per_channel=_env_int("SPHERE_CLONEMEM_CHANNEL_TAIL_RESCUE_PER_CHANNEL", 2),
+            clonemem_channel_tail_rescue_target_rank=_env_int("SPHERE_CLONEMEM_CHANNEL_TAIL_RESCUE_TARGET_RANK", 90),
+            clonemem_evidence_consensus_admission_enabled=_env_bool(
+                "SPHERE_CLONEMEM_EVIDENCE_CONSENSUS_ADMISSION_ENABLED",
+                False,
+            ),
+            clonemem_evidence_consensus_admission_max_candidates=_env_int(
+                "SPHERE_CLONEMEM_EVIDENCE_CONSENSUS_ADMISSION_MAX_CANDIDATES",
+                4,
+            ),
+            clonemem_evidence_consensus_admission_min_channels=_env_int(
+                "SPHERE_CLONEMEM_EVIDENCE_CONSENSUS_ADMISSION_MIN_CHANNELS",
+                2,
+            ),
+            clonemem_evidence_consensus_admission_target_rank=_env_int(
+                "SPHERE_CLONEMEM_EVIDENCE_CONSENSUS_ADMISSION_TARGET_RANK",
+                88,
+            ),
+            channel_gating_enabled=_env_bool("SPHERE_CHANNEL_GATING_ENABLED", True),
+            destructive_filter_guard_enabled=_env_bool("SPHERE_DESTRUCTIVE_FILTER_GUARD_ENABLED", True),
+            duplicate_collapse_safe_mode=_env_bool("SPHERE_DUPLICATE_COLLAPSE_SAFE_MODE", True),
+            parent_cap_after_gold_agnostic_anchor=_env_bool("SPHERE_PARENT_CAP_AFTER_GOLD_AGNOSTIC_ANCHOR", True),
+            inhibition_apply_after_candidate_recall_pool=_env_bool("SPHERE_INHIBITION_APPLY_AFTER_CANDIDATE_RECALL_POOL", True),
+            fusion_debug_enabled=_env_bool("SPHERE_FUSION_DEBUG_ENABLED", True),
+            duplicate_collapse_enabled=_env_bool("SPHERE_DUPLICATE_COLLAPSE_ENABLED", True),
+            near_duplicate_collapse_enabled=_env_bool("SPHERE_NEAR_DUPLICATE_COLLAPSE_ENABLED", True),
+            competition_inhibition_enabled=_env_bool("SPHERE_COMPETITION_INHIBITION_ENABLED", True),
+            max_candidates_per_parent=_env_int("SPHERE_MAX_CANDIDATES_PER_PARENT", 20),
+            min_parent_diversity=_env_int("SPHERE_MIN_PARENT_DIVERSITY", 5),
+            candidate_recall_eval_k=_env_int("SPHERE_CANDIDATE_RECALL_EVAL_K", 100),
+            route_aware_gating_enabled=_env_bool("SPHERE_ROUTE_AWARE_GATING_ENABLED", True),
+            route_aware_gating_aggressiveness=(env.get("SPHERE_ROUTE_AWARE_GATING_AGGRESSIVENESS", "safe").strip().lower() or "safe"),
+            retrieval_early_exit_enabled=_env_bool("SPHERE_RETRIEVAL_EARLY_EXIT_ENABLED", True),
+            retrieval_latency_budget_ms=_env_int("SPHERE_RETRIEVAL_LATENCY_BUDGET_MS", 0),
+            runtime_retrieval_latency_budget_ms=_env_int("SPHERE_RUNTIME_RETRIEVAL_LATENCY_BUDGET_MS", 0),
+            runtime_parallel_channels_enabled=_env_bool("SPHERE_RUNTIME_PARALLEL_CHANNELS_ENABLED", False),
+            retrieval_min_seed_candidates=_env_int("SPHERE_RETRIEVAL_MIN_SEED_CANDIDATES", 80),
+            retrieval_confidence_margin=_env_float("SPHERE_RETRIEVAL_CONFIDENCE_MARGIN", 0.12),
+            clone_failure_taxonomy_enabled=_env_bool("SPHERE_CLONE_FAILURE_TAXONOMY_ENABLED", True),
+            knowme_category_analysis_enabled=_env_bool("SPHERE_KNOWME_CATEGORY_ANALYSIS_ENABLED", True),
+            per_channel_oracle_enabled=_env_bool("SPHERE_PER_CHANNEL_ORACLE_ENABLED", True),
+            write_debug_examples=_env_bool("SPHERE_WRITE_DEBUG_EXAMPLES", True),
+            max_debug_examples_per_failure_type=_env_int("SPHERE_MAX_DEBUG_EXAMPLES_PER_FAILURE_TYPE", 20),
+            embedding_required_provider=(env.get("SPHERE_EMBEDDING_REQUIRED_PROVIDER", "sentence_transformer").strip().lower() or "sentence_transformer"),
+            embedding_required_model=env.get("SPHERE_EMBEDDING_REQUIRED_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
             enable_seed_clustering=_env_bool("SPHERE_ENABLE_SEED_CLUSTERING", True),
             enable_semantic_dedup=_env_bool("SPHERE_ENABLE_SEMANTIC_DEDUP", True),
             enable_conditional_rerank=_env_bool("SPHERE_ENABLE_CONDITIONAL_RERANK", True),

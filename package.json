@@ -1,0 +1,42 @@
+{
+  "name": "dysonspherain-memory",
+  "version": "0.1.0",
+  "description": "Quick-start wrapper for DysonSpherain MCP memory, hooks, plugins, and token economy diagnostics.",
+  "license": "GPL-3.0-or-later",
+  "type": "commonjs",
+  "bin": {
+    "dysonspherain-memory": "bin/dysonspherain-memory.js",
+    "dyson-memory": "bin/dysonspherain-memory.js"
+  },
+  "files": [
+    "bin/",
+    "base/dysonspherain/**/*.py",
+    "base/dysonspherain/adapters/codex/AGENTS.memory.md",
+    "base/sphere_cli/**/*.py",
+    "base/requirements.txt",
+    "base/README.md",
+    ".codex-plugin/plugin.json",
+    ".claude-plugin/plugin.json",
+    ".gemini/dyson-memory.json",
+    ".opencode/dyson-memory.json",
+    "LICENSE",
+    "pyproject.toml",
+    "docs/",
+    "README.md"
+  ],
+  "scripts": {
+    "quickstart": "node bin/dysonspherain-memory.js install --project .",
+    "smoke": "node bin/dysonspherain-memory.js --help"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcp",
+    "claude",
+    "codex",
+    "memory",
+    "token-economy",
+    "dysonspherain"
+  ]
+}

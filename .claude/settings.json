@@ -1,0 +1,64 @@
+{
+  "hooks": {
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "command": "python -m dysonspherain.adapters.claude_hooks.post_compact",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "python -m dysonspherain.adapters.claude_hooks.post_tool_use",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "python -m dysonspherain.adapters.claude_hooks.session_end",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "python -m dysonspherain.adapters.claude_hooks.session_start",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "python -m dysonspherain.adapters.claude_hooks.stop",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "python -m dysonspherain.adapters.claude_hooks.user_prompt_submit",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

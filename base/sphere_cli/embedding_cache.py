@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from array import array
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,9 +39,17 @@ class PersistentEmbeddingCache:
 
     def _connect(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = sqlite3.connect(self.db_path)
+            self._conn = sqlite3.connect(self.db_path, timeout=30.0)
             self._conn.row_factory = sqlite3.Row
-            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA busy_timeout=30000")
+            for attempt in range(6):
+                try:
+                    self._conn.execute("PRAGMA journal_mode=WAL")
+                    break
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower() or attempt == 5:
+                        raise
+                    time.sleep(0.2 * (attempt + 1))
             self._conn.execute("PRAGMA synchronous=NORMAL")
         return self._conn
 

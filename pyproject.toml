@@ -2,6 +2,7 @@
 name = "dysonspherain-cli"
 version = "0.1.0"
 description = "Local long-horizon memory CLI with evidence-first retrieval, graph edges, and bounded creative expansion."
+license = "GPL-3.0-or-later"
 requires-python = ">=3.10"
 dependencies = [
   "typer>=0.12.3",
@@ -14,6 +15,9 @@ dependencies = [
 vector = ["chromadb>=0.5.5"]
 embedding = ["sentence-transformers>=3.0.1"]
 full = ["chromadb>=0.5.5", "sentence-transformers>=3.0.1"]
+mcp = ["mcp>=1.0.0"]
+ui-test = ["playwright>=1.44.0"]
+encrypted = ["pysqlcipher3>=1.2.0"]
 
 [project.scripts]
 dysonspherain = "sphere_cli.__main__:main"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import datetime, timezone
 from time import perf_counter
@@ -1189,12 +1190,11 @@ class EvidencePipeline:
                 break
         chunks = self.storage.fetch_chunks_with_node_metadata_by_ids(chunk_ids) if chunk_ids else []
         if len(chunks) < limit:
+            preferred_by_node = self.storage.fetch_preferred_chunks_for_nodes(pending_node_ids)
             for node_id in pending_node_ids:
-                node_chunks = self.storage.fetch_chunks_for_node(node_id)
-                if not node_chunks:
+                chosen = preferred_by_node.get(node_id)
+                if not chosen:
                     continue
-                preferred = [chunk for chunk in node_chunks if str(chunk.get("grain") or "") != "macro"] or node_chunks
-                chosen = preferred[0]
                 chunk_id = str(chosen.get("chunk_id") or "")
                 if chunk_id and chunk_id not in chunk_ids:
                     chunk_ids.append(chunk_id)
@@ -1369,6 +1369,12 @@ class EvidencePipeline:
             for row in self.storage.fetch_chunks_with_node_metadata_by_ids(list(dict.fromkeys([item for item in direct_chunk_ids if item]))):
                 chunk_rows[str(row.get("chunk_id") or "")] = row
         node_chunks: dict[str, dict[str, Any]] = {}
+        node_parent_ids = [
+            str((hit.get("metadata") or {}).get("parent_id") or "")
+            for hit in proxy_hits
+            if str((hit.get("metadata") or {}).get("parent_type") or "chunk") == "node"
+        ]
+        preferred_by_node = self.storage.fetch_preferred_chunks_for_nodes(node_parent_ids)
         for hit in proxy_hits:
             meta = hit.get("metadata") or {}
             if str(meta.get("parent_type") or "chunk") != "node":
@@ -1376,12 +1382,7 @@ class EvidencePipeline:
             node_id = str(meta.get("parent_id") or "")
             if not node_id or node_id in node_chunks:
                 continue
-            chunks = self.storage.fetch_chunks_for_node(node_id)
-            if not chunks:
-                continue
-            preferred = [chunk for chunk in chunks if str(chunk.get("grain") or "") != "macro"] or chunks
-            chosen = preferred[0]
-            hydrated = self.storage.hydrate_chunk_with_node_metadata(str(chosen.get("chunk_id") or ""))
+            hydrated = preferred_by_node.get(node_id)
             if hydrated:
                 node_chunks[node_id] = hydrated
                 chunk_rows[str(hydrated.get("chunk_id") or "")] = hydrated
@@ -1668,7 +1669,16 @@ class EvidencePipeline:
         if route_tuning.fine_topk:
             query_route.suggested_config["fine_topk"] = int(route_tuning.fine_topk)
         timings_ms: dict[str, float] = {}
-        diagnostics: dict[str, Any] = {"candidate_counts": {}, "decisions": {}, "cache": {}}
+        runtime_latency_budget_ms = max(0, int(getattr(self.config, "runtime_retrieval_latency_budget_ms", 0) or 0))
+        channel_parallel_enabled = bool(getattr(self.config, "runtime_parallel_channels_enabled", False))
+        diagnostics: dict[str, Any] = {
+            "candidate_counts": {},
+            "decisions": {},
+            "cache": {},
+            "feature_cache": {"hits": 0, "misses": 0},
+        }
+        self._active_candidate_feature_cache = {}
+        self._active_feature_cache_stats = {"hits": 0, "misses": 0}
         runtime_before = self._snapshot_runtime_stats()
         memory_version = self._get_memory_version()
         coarse_topk = max(8, int(query_route.suggested_config.get("coarse_topk", self.config.retrieval_topk_coarse) or self.config.retrieval_topk_coarse))
@@ -1686,6 +1696,9 @@ class EvidencePipeline:
         diagnostics["candidate_counts"]["dense_probe_k"] = dense_probe_k
         diagnostics["candidate_counts"]["proxy_probe_k"] = proxy_probe_k
         diagnostics["candidate_counts"]["sparse_probe_k"] = sparse_probe_k
+        diagnostics["runtime_latency_budget_ms"] = runtime_latency_budget_ms
+        diagnostics["runtime_latency_budget_exceeded"] = False
+        diagnostics["channel_parallel_enabled"] = channel_parallel_enabled
 
         normalized_query, query_fingerprint = self._retrieval_cache_key(
             query,
@@ -1800,6 +1813,7 @@ class EvidencePipeline:
             )
             ranked_candidates, exact_guard_reason = self._apply_exact_evidence_guard(ranked_candidates, profile)
             rank_ms = (perf_counter() - stage_start) * 1000.0
+            diagnostics["rank_pass_count"] = 1
             initial_ranked = ranked_candidates
             initial_guard_reason = exact_guard_reason
             diagnostics["decisions"]["object_support"] = "skipped_shortcut_sufficient"
@@ -1811,6 +1825,31 @@ class EvidencePipeline:
             timings_ms["sparse_object_fts_ms"] = 0.0
         else:
             query_variants = self._route_query_variants(query, route_context)
+            before_dedup_count = len(query_variants)
+            deduped_variants: list[str] = []
+            seen_variant_keys: set[str] = set()
+            for variant in query_variants:
+                variant_key = normalize_text_for_hash(variant).lower()
+                if not variant_key or variant_key in seen_variant_keys:
+                    continue
+                seen_variant_keys.add(variant_key)
+                deduped_variants.append(variant)
+            simple_factual_route = (
+                not profile.needs_multi_hop_evidence
+                and not profile.needs_temporal_objects
+                and not profile.needs_preference_objects
+                and float(query_route.confidence or 0.0) >= 0.62
+            )
+            if simple_factual_route:
+                deduped_variants = deduped_variants[:2]
+            elif profile.needs_temporal_objects or profile.needs_preference_objects:
+                deduped_variants = deduped_variants[:3]
+            else:
+                deduped_variants = deduped_variants[:6]
+            query_variants = deduped_variants or [query]
+            diagnostics["query_variant_budget"] = len(query_variants)
+            diagnostics["query_variant_count_before_dedup"] = before_dedup_count
+            diagnostics["query_variant_count_after_dedup"] = len(query_variants)
             diagnostics["queries"] = [
                 {
                     "query": variant,
@@ -1829,43 +1868,76 @@ class EvidencePipeline:
             proxy_chunks = []
             sparse_chunks = []
 
-            for query_variant in query_variants:
-                route_variant = self._route_variant_label(query_variant, query, route_context)
-                stage_start = perf_counter()
-                variant_dense_chunks = []
+            def _dense_variant(query_variant: str, route_variant: str, variant_dense_k: int) -> tuple[list[dict[str, Any]], float]:
+                stage = perf_counter()
+                rows: list[dict[str, Any]] = []
                 if hasattr(self.vector_store, "search"):
-                    variant_dense_chunks = self.vector_store.search(query_variant, top_k=max(dense_probe_k, 12))
-                    variant_dense_chunks = self._filter_hits_by_scope_context(variant_dense_chunks, route_context)
-                    variant_dense_chunks = self._tag_route_variant_hits(variant_dense_chunks, route_variant)
-                dense_vector_ms += (perf_counter() - stage_start) * 1000.0
+                    rows = self.vector_store.search(query_variant, top_k=variant_dense_k)
+                    rows = self._filter_hits_by_scope_context(rows, route_context)
+                    rows = self._tag_route_variant_hits(rows, route_variant)
+                return rows, (perf_counter() - stage) * 1000.0
+
+            def _proxy_variant(query_variant: str, route_variant: str, variant_proxy_k: int) -> tuple[list[dict[str, Any]], float, str]:
+                stage = perf_counter()
+                rows, reason = self._search_proxy_chunks(query_variant, profile, query_route, top_k=variant_proxy_k)
+                rows = self._filter_hits_by_scope_context(rows, route_context)
+                rows = self._tag_route_variant_hits(rows, route_variant)
+                return rows, (perf_counter() - stage) * 1000.0, reason
+
+            def _sparse_variant(query_variant: str, route_variant: str, variant_sparse_k: int) -> tuple[list[dict[str, Any]], float]:
+                stage = perf_counter()
+                rows = self._sparse_chunk_hits(query_variant, limit=variant_sparse_k)
+                rows = self._filter_hits_by_scope_context(rows, route_context)
+                rows = self._tag_route_variant_hits(rows, route_variant)
+                return rows, (perf_counter() - stage) * 1000.0
+
+            for variant_index, query_variant in enumerate(query_variants):
+                if runtime_latency_budget_ms > 0 and (perf_counter() - total_start) * 1000.0 > runtime_latency_budget_ms:
+                    diagnostics["runtime_latency_budget_exceeded"] = True
+                    break
+                route_variant = self._route_variant_label(query_variant, query, route_context)
+                variant_scale = 1.0 if variant_index == 0 else (0.55 if simple_factual_route else 0.75)
+                variant_dense_k = max(12, int(dense_probe_k * variant_scale))
+                variant_proxy_k = max(12, int(proxy_probe_k * variant_scale))
+                variant_sparse_k = max(12, int(sparse_probe_k * variant_scale))
+                if channel_parallel_enabled:
+                    with ThreadPoolExecutor(max_workers=3) as executor:
+                        dense_future = executor.submit(_dense_variant, query_variant, route_variant, variant_dense_k)
+                        proxy_future = executor.submit(_proxy_variant, query_variant, route_variant, variant_proxy_k)
+                        sparse_future = executor.submit(_sparse_variant, query_variant, route_variant, variant_sparse_k)
+                        variant_dense_chunks, dense_elapsed = dense_future.result()
+                        variant_proxy_chunks, proxy_elapsed, variant_proxy_reason = proxy_future.result()
+                        variant_sparse_chunks, sparse_elapsed = sparse_future.result()
+                    dense_vector_ms += dense_elapsed
+                    proxy_vector_ms += proxy_elapsed
+                    sparse_fts_ms += sparse_elapsed
+                    dense_chunks.extend(variant_dense_chunks)
+                    proxy_chunks.extend(variant_proxy_chunks)
+                    sparse_chunks.extend(variant_sparse_chunks)
+                    proxy_reasons.append(f"{query_variant}: {variant_proxy_reason}")
+                    continue
+                variant_dense_chunks, dense_elapsed = _dense_variant(query_variant, route_variant, variant_dense_k)
+                dense_vector_ms += dense_elapsed
                 dense_chunks.extend(variant_dense_chunks)
 
-                stage_start = perf_counter()
-                variant_proxy_chunks, variant_proxy_reason = self._search_proxy_chunks(
-                    query_variant,
-                    profile,
-                    query_route,
-                    top_k=max(proxy_probe_k, 12),
-                )
-                variant_proxy_chunks = self._filter_hits_by_scope_context(variant_proxy_chunks, route_context)
-                variant_proxy_chunks = self._tag_route_variant_hits(variant_proxy_chunks, route_variant)
-                proxy_vector_ms += (perf_counter() - stage_start) * 1000.0
+                variant_proxy_chunks, proxy_elapsed, variant_proxy_reason = _proxy_variant(query_variant, route_variant, variant_proxy_k)
+                proxy_vector_ms += proxy_elapsed
                 proxy_chunks.extend(variant_proxy_chunks)
                 proxy_reasons.append(f"{query_variant}: {variant_proxy_reason}")
 
-                stage_start = perf_counter()
-                variant_sparse_chunks = self._sparse_chunk_hits(query_variant, limit=max(sparse_probe_k, 12))
-                variant_sparse_chunks = self._filter_hits_by_scope_context(variant_sparse_chunks, route_context)
-                variant_sparse_chunks = self._tag_route_variant_hits(variant_sparse_chunks, route_variant)
-                sparse_fts_ms += (perf_counter() - stage_start) * 1000.0
+                variant_sparse_chunks, sparse_elapsed = _sparse_variant(query_variant, route_variant, variant_sparse_k)
+                sparse_fts_ms += sparse_elapsed
                 sparse_chunks.extend(variant_sparse_chunks)
 
             timings_ms["dense_vector_ms"] = round(dense_vector_ms, 2)
+            diagnostics["dense_runtime_ms"] = round(dense_vector_ms, 2)
             diagnostics["candidate_counts"]["dense_chunks"] = len(dense_chunks)
             timings_ms["proxy_vector_ms"] = round(proxy_vector_ms, 2)
+            diagnostics["proxy_runtime_ms"] = round(proxy_vector_ms, 2)
             diagnostics["candidate_counts"]["proxy_chunks"] = len(proxy_chunks)
             diagnostics["decisions"]["proxy_retrieval"] = " | ".join(proxy_reasons)
             timings_ms["sparse_fts_ms"] = round(sparse_fts_ms, 2)
+            diagnostics["sparse_runtime_ms"] = round(sparse_fts_ms, 2)
             diagnostics["candidate_counts"]["sparse_chunks"] = len(sparse_chunks)
 
             stage_start = perf_counter()
@@ -1908,12 +1980,20 @@ class EvidencePipeline:
             initial_ranked, initial_guard_reason = self._apply_exact_evidence_guard(initial_ranked, profile)
             rank_ms = (perf_counter() - stage_start) * 1000.0
             use_object_support, object_reason = self._should_use_object_support(profile, initial_ranked, evidence_top_k)
+            initial_margin = self._ranking_diagnostics(initial_ranked).get("top_margin_1_2", 0.0)
+            initial_top_score = float(initial_ranked[0].get("evidence_score") or 0.0) if initial_ranked else 0.0
+            if use_object_support and initial_top_score >= 0.78 and float(initial_margin or 0.0) >= 0.12 and initial_guard_reason != "failed_exact_guard":
+                use_object_support = False
+                object_reason = "skipped_high_confidence_dense_sparse_evidence"
             diagnostics["decisions"]["object_support"] = object_reason
             diagnostics["decisions"]["exact_evidence_guard_pre_object"] = initial_guard_reason
             diagnostics.setdefault("decision_scores", {})["object_support_enabled"] = 1.0 if use_object_support else 0.0
+            diagnostics["object_support_triggered"] = bool(use_object_support)
+            diagnostics["object_support_reason"] = object_reason
 
             chunk_candidates = initial_candidates
             ranked_candidates = initial_ranked
+            rank_pass_count = 1
             if use_object_support:
                 stage_start = perf_counter()
                 dense_objects = self.vector_store.search_objects(query, top_k=max(fine_topk * 3, 12)) if hasattr(self.vector_store, "search_objects") else []
@@ -1945,6 +2025,7 @@ class EvidencePipeline:
                 )
                 ranked_candidates, exact_guard_reason = self._apply_exact_evidence_guard(ranked_candidates, profile)
                 rank_ms += (perf_counter() - stage_start) * 1000.0
+                rank_pass_count += 1
                 object_ms = dense_object_ms + sparse_object_ms
                 timings_ms["dense_object_ms"] = round(dense_object_ms, 2)
                 timings_ms["sparse_object_fts_ms"] = round(sparse_object_ms, 2)
@@ -1952,10 +2033,28 @@ class EvidencePipeline:
                 exact_guard_reason = initial_guard_reason
                 timings_ms["dense_object_ms"] = 0.0
                 timings_ms["sparse_object_fts_ms"] = 0.0
+            diagnostics["rank_pass_count"] = rank_pass_count
+            diagnostics["object_runtime_ms"] = round(object_ms, 2)
+            diagnostics["full_rank_avoided"] = bool(rank_pass_count == 1)
+            diagnostics["incremental_rank_used"] = bool(use_object_support and rank_pass_count == 1)
 
         diagnostics["candidate_counts"]["dense_objects"] = len(dense_objects)
         diagnostics["candidate_counts"]["sparse_objects"] = len(sparse_objects)
         diagnostics["candidate_counts"]["merged_chunks"] = len(chunk_candidates)
+        diagnostics.setdefault("query_variant_budget", 0 if shortcut_hit else diagnostics["candidate_counts"].get("query_variants", 0))
+        diagnostics.setdefault("dense_runtime_ms", float(timings_ms.get("dense_vector_ms", 0.0)))
+        diagnostics.setdefault("proxy_runtime_ms", float(timings_ms.get("proxy_vector_ms", 0.0)))
+        diagnostics.setdefault("sparse_runtime_ms", float(timings_ms.get("sparse_fts_ms", 0.0)))
+        diagnostics.setdefault("object_runtime_ms", round(object_ms, 2))
+        diagnostics.setdefault("full_rank_avoided", bool(int(diagnostics.get("rank_pass_count") or 0) <= 1))
+        diagnostics.setdefault("incremental_rank_used", False)
+        feature_stats = dict(getattr(self, "_active_feature_cache_stats", {}) or {})
+        diagnostics["feature_cache_hits"] = int(feature_stats.get("hits") or 0)
+        diagnostics["feature_cache_misses"] = int(feature_stats.get("misses") or 0)
+        diagnostics["feature_cache"] = {
+            "hits": int(feature_stats.get("hits") or 0),
+            "misses": int(feature_stats.get("misses") or 0),
+        }
         diagnostics["candidate_counts"]["grain_after_objects"] = self._grain_distribution(chunk_candidates)
         diagnostics["decisions"]["exact_evidence_guard"] = exact_guard_reason
         ranking_summary = self._ranking_diagnostics(ranked_candidates)
@@ -2925,7 +3024,39 @@ class EvidencePipeline:
         grain_weight = 1.0 + exact_boost * 0.2
         structure_weight = 0.18
         for candidate in candidates:
-            candidate_text, candidate_lower, candidate_tokens = self._candidate_text_features(candidate)
+            active_cache = getattr(self, "_active_candidate_feature_cache", None)
+            feature_stats = getattr(self, "_active_feature_cache_stats", None)
+            cache_key = ""
+            if isinstance(active_cache, dict):
+                cache_key = stable_content_hash(
+                    json.dumps(
+                        {
+                            "chunk_id": str(candidate.get("chunk_id") or ""),
+                            "node_id": str(candidate.get("node_id") or ""),
+                            "text_hash": normalize_text_for_hash(str(candidate.get("text") or "")[:1200]).lower(),
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                )
+            cached_features = active_cache.get(cache_key) if isinstance(active_cache, dict) and cache_key else None
+            if cached_features is not None:
+                if isinstance(feature_stats, dict):
+                    feature_stats["hits"] = int(feature_stats.get("hits") or 0) + 1
+                candidate_text = str(cached_features.get("text") or "")
+                candidate_lower = str(cached_features.get("lower") or "")
+                candidate_tokens = set(cached_features.get("tokens") or [])
+            else:
+                if isinstance(feature_stats, dict):
+                    feature_stats["misses"] = int(feature_stats.get("misses") or 0) + 1
+                candidate_text, candidate_lower, candidate_tokens = self._candidate_text_features(candidate)
+                if isinstance(active_cache, dict) and cache_key:
+                    active_cache[cache_key] = {
+                        "text": candidate_text,
+                        "lower": candidate_lower,
+                        "tokens": list(candidate_tokens),
+                        "normalized_text_hash": normalize_text_for_hash(candidate_text).lower(),
+                    }
             time_score = self._time_score(profile, query_tokens, candidate_lower, candidate_tokens)
             temporal_prior_score, candidate_epoch, timestamp_source = self._temporal_prior_score(profile, candidate, temporal_state)
             preference_score = self._preference_score(profile, query_tokens, candidate, candidate_lower, candidate_tokens)

@@ -1201,6 +1201,48 @@ class Storage:
         by_id = {row["chunk_id"]: dict(row) for row in rows}
         return [by_id[chunk_id] for chunk_id in chunk_ids if chunk_id in by_id]
 
+    def fetch_preferred_chunks_for_nodes(
+        self,
+        node_ids: list[str],
+        *,
+        prefer_non_macro: bool = True,
+    ) -> dict[str, dict[str, Any]]:
+        unique_node_ids = list(dict.fromkeys(node_id for node_id in node_ids if node_id))
+        if not unique_node_ids:
+            return {}
+        placeholders = ",".join(["?"] * len(unique_node_ids))
+        grain_order = "CASE WHEN c.grain != 'macro' THEN 0 ELSE 1 END" if prefer_non_macro else "0"
+        started = perf_counter()
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                WITH ranked AS (
+                    SELECT c.chunk_id, c.node_id, c.chunk_index, c.grain, c.text, c.content_hash,
+                           c.scope, c.workspace, c.project, c.session_id,
+                           c.retrieval_summary, c.structured_summary, c.retrieval_signature, c.time_bucket, c.entity_tags, c.task_type_tag,
+                           c.token_estimate, c.source_kind, c.source_path, c.source_type, c.source_ref, c.created_at, c.updated_at,
+                           n.shell, n.sector, n.zone, n.cell, n.scope AS node_scope, n.workspace AS node_workspace,
+                           n.project AS node_project, n.session_id AS node_session_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY c.node_id
+                               ORDER BY {grain_order}, c.chunk_index ASC
+                           ) AS rn
+                    FROM memory_chunks c
+                    JOIN memory_nodes n ON n.id = c.node_id
+                    WHERE c.node_id IN ({placeholders})
+                )
+                SELECT * FROM ranked WHERE rn = 1
+                """,
+                tuple(unique_node_ids),
+            ).fetchall()
+        self._record_stat("fetch_preferred_chunks_for_nodes", (perf_counter() - started) * 1000.0, rows=len(rows))
+        by_node_id: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            payload = dict(row)
+            payload.pop("rn", None)
+            by_node_id[str(payload.get("node_id") or "")] = payload
+        return {node_id: by_node_id[node_id] for node_id in unique_node_ids if node_id in by_node_id}
+
     def fetch_chunks_with_node_metadata_by_ids(self, chunk_ids: list[str]) -> list[dict[str, Any]]:
         if not chunk_ids:
             return []

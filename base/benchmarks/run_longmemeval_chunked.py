@@ -31,7 +31,7 @@ def default_python_exe() -> Path:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run LongMemEval in chunked parallel mode and merge results.")
     parser.add_argument("data_file", nargs="?", type=Path, default=DEFAULT_DATA_FILE, help="Path to longmemeval_s_cleaned.json")
-    parser.add_argument("--mode", choices=["vector", "evidence", "activation", "hybrid"], default="evidence")
+    parser.add_argument("--mode", choices=["vector", "bm25", "evidence", "activation", "hybrid"], default="evidence")
     parser.add_argument("--granularity", choices=["session", "turn"], default="session")
     parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--rerank-mode", choices=["rule", "hybrid", "cross_encoder"], default="rule")

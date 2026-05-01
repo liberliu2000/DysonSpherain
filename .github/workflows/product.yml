@@ -1,0 +1,39 @@
+name: Product Memory
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  product-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package and UI test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[ui-test]"
+          python -m playwright install --with-deps chromium
+      - name: Run product acceptance tests
+        run: |
+          python -m py_compile scripts/product_acceptance_smoke.py base/dysonspherain/product/store.py base/dysonspherain/adapters/daemon.py base/sphere_cli/cli.py
+          python scripts/product_acceptance_smoke.py --output reports/product_acceptance_smoke.json
+          python -m pytest tests/test_product_ui_playwright.py tests/test_product_acceptance_smoke.py tests/test_product_memory.py tests/test_daemon_api.py tests/test_memory_cli.py tests/test_mcp_server.py tests/test_npm_wrapper.py tests/test_codex_config_generation.py -q
+
+  product-chroma:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install full product dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[full]"
+      - name: Run Chroma-backed product vector test
+        run: |
+          python -m pytest tests/test_product_chroma_vector.py -q

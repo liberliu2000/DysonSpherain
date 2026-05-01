@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Iterable, Protocol, Sequence, cast
@@ -23,6 +24,33 @@ class _SentenceTransformerModel(Protocol):
 
 _ST_MODEL_CACHE: dict[str, _SentenceTransformerModel] = {}
 _COMPUTE_MS_HINTS: dict[str, float] = {}
+EMBEDDING_PREPROCESS_VERSION = "normalize_text_for_hash_v2"
+
+
+def embedding_fallback_allowed() -> bool:
+    return (os.environ.get("ALLOW_EMBEDDING_FALLBACK") or "").strip() == "1"
+
+
+def _hf_snapshot_path(model_name: str) -> Path | None:
+    if not model_name or model_name.startswith("/") or Path(model_name).exists():
+        return Path(model_name) if model_name and Path(model_name).exists() else None
+    hf_home = Path(os.environ.get("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
+    hub_root = Path(os.environ.get("HUGGINGFACE_HUB_CACHE") or (hf_home / "hub"))
+    repo_dir = hub_root / f"models--{model_name.replace('/', '--')}"
+    if not repo_dir.exists():
+        return None
+    refs_main = repo_dir / "refs" / "main"
+    snapshot_id = refs_main.read_text(encoding="utf-8").strip() if refs_main.exists() else ""
+    candidates: list[Path] = []
+    if snapshot_id:
+        candidates.append(repo_dir / "snapshots" / snapshot_id)
+    snapshots_dir = repo_dir / "snapshots"
+    if snapshots_dir.exists():
+        candidates.extend(path for path in snapshots_dir.iterdir() if path.is_dir())
+    for candidate in candidates:
+        if (candidate / "modules.json").exists() or (candidate / "config.json").exists():
+            return candidate
+    return None
 
 
 class LocalHashEmbedder:
@@ -60,7 +88,11 @@ class SentenceTransformerEmbedder:
 
             model = _ST_MODEL_CACHE.get(model_name)
             if model is None:
-                model = cast(_SentenceTransformerModel, SentenceTransformer(model_name))
+                load_target = _hf_snapshot_path(model_name) or model_name
+                kwargs: dict[str, Any] = {}
+                if load_target == model_name:
+                    kwargs["local_files_only"] = True
+                model = cast(_SentenceTransformerModel, SentenceTransformer(str(load_target), **kwargs))
                 _ST_MODEL_CACHE[model_name] = model
             self._model = model
             self.is_available = True
@@ -70,8 +102,8 @@ class SentenceTransformerEmbedder:
             self.load_error = f"{exc.__class__.__name__}: {exc}"
             if fail_fast:
                 raise RuntimeError(
-                    f"Embedding model {model_name!r} is unavailable and SPHERE_EMBEDDING_FAIL_FAST=1 is set. "
-                    "Install/cache the model or unset fail-fast for development fallback."
+                    f"Embedding model {model_name!r} is unavailable and fail-fast is enabled. "
+                    "Install/cache the model or explicitly set ALLOW_EMBEDDING_FALLBACK=1 for local hash fallback."
                 ) from exc
 
     def embed(self, text: str) -> list[float]:
@@ -94,6 +126,7 @@ class SentenceTransformerEmbedder:
 class EmbedderInfo:
     provider: str
     model_name: str
+    embedding_dim: int
     fallback_in_use: bool
 
 
@@ -106,12 +139,16 @@ class EmbeddingProvider:
         cache_path: str | Path | None = None,
         fail_fast: bool = False,
     ) -> None:
-        self.primary = SentenceTransformerEmbedder(preferred_model_name, fail_fast=fail_fast)
+        self.fallback_allowed = embedding_fallback_allowed()
+        self.effective_fail_fast = bool(fail_fast or not self.fallback_allowed)
+        self.primary = SentenceTransformerEmbedder(preferred_model_name, fail_fast=self.effective_fail_fast)
         self.fallback = LocalHashEmbedder(fallback_dim)
         self.active = self.primary if self.primary.is_available else self.fallback
+        self.embedding_dim = int(fallback_dim)
         self.info = EmbedderInfo(
             provider="sentence_transformer" if self.primary.is_available else "local_hash",
             model_name=self.active.name,
+            embedding_dim=self.embedding_dim,
             fallback_in_use=not self.primary.is_available,
         )
         self.primary_load_error = self.primary.load_error
@@ -244,11 +281,22 @@ class EmbeddingProvider:
         return snapshot
 
     def _cache_key(self, content_hash: str) -> str:
-        return f"{self.info.provider}:{self.info.model_name}:{content_hash}"
+        return (
+            f"{self.info.provider}:"
+            f"{self.info.model_name}:"
+            f"{self.info.embedding_dim}:"
+            f"{EMBEDDING_PREPROCESS_VERSION}:"
+            f"{content_hash}"
+        )
 
     def _remember(self, cache_key: str, embedding: list[float]) -> None:
         if cache_key in self._cache or len(self._cache) < self._cache_size:
             self._cache[cache_key] = embedding
 
     def _hint_key(self) -> str:
-        return f"{self.info.provider}:{self.info.model_name}"
+        return (
+            f"{self.info.provider}:"
+            f"{self.info.model_name}:"
+            f"{self.info.embedding_dim}:"
+            f"{EMBEDDING_PREPROCESS_VERSION}"
+        )
