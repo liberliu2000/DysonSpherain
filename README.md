@@ -1,4 +1,8 @@
-# DysonSpherain
+
+<div align="center">
+  <img width="502" height="282" alt="logo" 
+       src="https://github.com/user-attachments/assets/f07e012c-86f6-4634-bf81-8fd2e333b9c9" />
+</div>
 
 <p align="center">
   <strong>Local-first memory OS for coding agents.</strong><br/>
