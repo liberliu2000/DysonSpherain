@@ -1,5 +1,5 @@
 {
-  "name": "dysonspherain-memory",
+  "name": "@liberliu/dysonspherain-memory",
   "version": "0.1.0",
   "description": "Quick-start wrapper for DysonSpherain MCP memory, hooks, plugins, and token economy diagnostics.",
   "license": "GPL-3.0-or-later",

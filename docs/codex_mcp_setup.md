@@ -9,14 +9,14 @@ dysonspherain adapters install-codex-mcp --project .
 From npm/npx, use the lightweight wrapper:
 
 ```bash
-npx dysonspherain-memory install --project .
-npx dysonspherain-memory doctor --project .
+npx @liberliu/dysonspherain-memory install --project .
+npx @liberliu/dysonspherain-memory doctor --project .
 ```
 
 Or install a persistent command:
 
 ```bash
-npm install -g dysonspherain-memory
+npm install -g @liberliu/dysonspherain-memory
 dyson-memory install --project .
 dyson-memory doctor --project .
 ```
@@ -31,15 +31,15 @@ Python dependencies yourself.
 Plugin-only quick start:
 
 ```bash
-npx dysonspherain-memory plugin install --project .
-npx dysonspherain-memory plugin print
+npx @liberliu/dysonspherain-memory plugin install --project .
+npx @liberliu/dysonspherain-memory plugin print
 ```
 
 Optional user-level supervisor install:
 
 ```bash
-npx dysonspherain-memory supervisor install --project .
-npx dysonspherain-memory supervisor status --project .
+npx @liberliu/dysonspherain-memory supervisor install --project .
+npx @liberliu/dysonspherain-memory supervisor status --project .
 ```
 
 Pass `--activate` to start the generated macOS `launchd` or Linux `systemd --user`

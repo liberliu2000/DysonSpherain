@@ -13,17 +13,17 @@ function usage() {
   console.log(`DysonSpherain Memory quick-start wrapper
 
 Usage:
-  npx dysonspherain-memory install [--project <path>]
-  npm install -g dysonspherain-memory && dyson-memory install --project .
-  npx dysonspherain-memory doctor [--project <path>]
-  npx dysonspherain-memory plugin install [--project <path>]
-  npx dysonspherain-memory plugin print
-  npx dysonspherain-memory daemon [--project <path>] [--port <port>]
-  npx dysonspherain-memory supervisor install [--project <path>] [--activate]
-  npx dysonspherain-memory supervisor status [--project <path>]
-  npx dysonspherain-memory supervisor uninstall [--deactivate]
-  npx dysonspherain-memory bootstrap
-  npx dysonspherain-memory mcp-smoke
+  npx @liberliu/dysonspherain-memory install [--project <path>]
+  npm install -g @liberliu/dysonspherain-memory && dyson-memory install --project .
+  npx @liberliu/dysonspherain-memory doctor [--project <path>]
+  npx @liberliu/dysonspherain-memory plugin install [--project <path>]
+  npx @liberliu/dysonspherain-memory plugin print
+  npx @liberliu/dysonspherain-memory daemon [--project <path>] [--port <port>]
+  npx @liberliu/dysonspherain-memory supervisor install [--project <path>] [--activate]
+  npx @liberliu/dysonspherain-memory supervisor status [--project <path>]
+  npx @liberliu/dysonspherain-memory supervisor uninstall [--deactivate]
+  npx @liberliu/dysonspherain-memory bootstrap
+  npx @liberliu/dysonspherain-memory mcp-smoke
 
 Options:
   --python <exe>     Python executable to use (default: DYSON_PYTHON, python3, python)

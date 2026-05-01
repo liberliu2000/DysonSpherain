@@ -72,9 +72,9 @@ DysonSpherain is not just a vector search wrapper. It is a local memory layer bu
 ### Option A — use the npm wrapper
 
 ```bash
-npx dysonspherain-memory install --project .
-npx dysonspherain-memory doctor --project .
-npx dysonspherain-memory daemon --project . --port 37777
+npx @liberliu/dysonspherain-memory install --project .
+npx @liberliu/dysonspherain-memory doctor --project .
+npx @liberliu/dysonspherain-memory daemon --project . --port 37777
 ```
 
 Then open:
@@ -218,27 +218,27 @@ DysonSpherain is designed to sit beside your coding agents rather than replace t
 Install common integrations:
 
 ```bash
-npx dysonspherain-memory install --project .
+npx @liberliu/dysonspherain-memory install --project .
 ```
 
 Install plugin manifests only:
 
 ```bash
-npx dysonspherain-memory plugin install --project .
-npx dysonspherain-memory plugin print
+npx @liberliu/dysonspherain-memory plugin install --project .
+npx @liberliu/dysonspherain-memory plugin print
 ```
 
 Start the MCP/local daemon path:
 
 ```bash
-npx dysonspherain-memory daemon --project . --port 37777
+npx @liberliu/dysonspherain-memory daemon --project . --port 37777
 ```
 
 Install user-level supervisor configs:
 
 ```bash
-npx dysonspherain-memory supervisor install --project . --activate
-npx dysonspherain-memory supervisor status --project .
+npx @liberliu/dysonspherain-memory supervisor install --project . --activate
+npx @liberliu/dysonspherain-memory supervisor status --project .
 ```
 
 ---
@@ -399,7 +399,7 @@ The MCP server exposes memory tools that agents can call directly.
 Smoke-test the MCP path:
 
 ```bash
-npx dysonspherain-memory mcp-smoke
+npx @liberliu/dysonspherain-memory mcp-smoke
 ```
 
 ---
