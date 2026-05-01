@@ -1,121 +1,232 @@
 # DysonSpherain
 
-> Local-first long-horizon memory, context recall, and token-economy tooling for coding agents.
+<p align="center">
+  <strong>Local-first memory OS for coding agents.</strong><br/>
+  Give Codex, Claude Code, Gemini CLI, OpenCode, and MCP-capable tools a durable project memory — without pasting the same context again and again.
+</p>
 
-DysonSpherain gives agent workflows a durable project memory layer. It captures
-decisions, observations, benchmark results, runtime events, files, traces, and
-task state locally, then recalls compact evidence packs instead of asking you to
-paste the same background into every new prompt.
+<p align="center">
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.10%2B-blue">
+  <img alt="Node" src="https://img.shields.io/badge/Node-18%2B-green">
+  <img alt="MCP Ready" src="https://img.shields.io/badge/MCP-ready-purple">
+  <img alt="Local First" src="https://img.shields.io/badge/local--first-yes-black">
+  <img alt="License" src="https://img.shields.io/badge/license-GPL--3.0--or--later-lightgrey">
+</p>
 
-The current codebase is no longer just a CLI. It ships as:
+---
 
-- **Python CLI** for product memory, retrieval, context packs, lifecycle events,
-  benchmark lab records, maintenance, privacy, and index management.
-- **Local Web UI and HTTP API** served by the built-in daemon.
-- **MCP server** for Codex, Claude, Gemini CLI, OpenCode, and other MCP-capable
-  tools.
-- **Claude hooks** for session start, prompt submission, tool use, stop,
-  session end, and post-compact events.
-- **npm/npx wrapper** for quick start, plugin install, daemon launch, and
-  user-level supervisor installation.
-- **Product evidence store** with SQLite, FTS5, dense probe, configurable
-  embeddings, optional Chroma ANN indexing, retention/export/delete, and
-  maintenance review flows.
+## Why DysonSpherain?
 
-## Capability Map
+Modern coding agents are powerful, but they forget the exact things that matter most: project decisions, failed attempts, benchmark results, constraints, errors, and why a previous implementation was rejected.
 
-| Area | Current support |
+**DysonSpherain turns your repository into a long-horizon memory workspace.** It records useful project evidence locally, retrieves only the relevant pieces, and injects compact context packs into your agent workflow.
+
+Instead of writing prompts like this every day:
+
+> “Remember the previous benchmark regression, the config issue, the fallback embedding problem, the latest test command, the current design constraint, and the reason we changed retrieval fusion...”
+
+You ask the agent to continue — and DysonSpherain provides the evidence.
+
+---
+
+## What you get at a glance
+
+| You want... | DysonSpherain gives you... |
 |---|---|
-| Agent setup | Codex MCP config, Claude hooks, Codex/Claude plugin manifests, Gemini CLI and OpenCode manifests |
-| Memory store | Local `.memory/dyson_product.sqlite3` with raw traces, evidence capsules, retrieval traces, context packs, runtime events, benchmark runs, aliases, and maintenance suggestions |
-| Retrieval | Sparse/FTS, dense probe, artifact/code/entity/temporal probes, route classification, admission trace, validity filtering |
-| Context recall | Resume context, product wake/context packs, section budgets, markdown/json/yaml/text rendering |
-| Token economy | Per-event saved-token estimates, 24h/7d/30d summaries, Web UI display, benchmark artifact reporting |
-| Scale path | SQLite inline vectors by default; optional `sentence_transformers` embeddings and Chroma ANN product vector index |
-| Privacy | `.dysonignore`, redaction before write, retention, export, soft/hard forget, external encryption marker, optional SQLCipher migration |
-| Operations | Health doctor, index rebuild/repair, maintenance apply/dismiss, launchd/systemd user supervisor templates |
+| Agents that remember long projects | Local project memory across sessions, windows, and tools |
+| Less prompt repetition | Compact evidence packs instead of full chat history |
+| Safer agent continuation | Decisions, constraints, errors, commands, and artifacts are stored as auditable evidence |
+| Multi-agent compatibility | Codex, Claude Code hooks, Gemini CLI, OpenCode, and generic MCP tools |
+| A usable interface | Local Web UI for search, timeline, benchmark lab, context composer, health checks, and settings |
+| Control over data | `.memory/` local storage, `.dysonignore`, redaction, retention, export, and forget commands |
+| Measurable efficiency | Token-economy reports estimate context saved by memory recall |
 
-## Architecture
+---
+
+## The core idea
 
 ```mermaid
 flowchart LR
-    User[User or coding agent] --> Entry[CLI / MCP / hooks / Web UI]
-    Entry --> Intent[Memory intent and runtime hooks]
-    Entry --> ProductAPI[Local daemon API]
-    Intent --> Store[(Local product memory store)]
-    ProductAPI --> Store
-    Store --> Retrieval[Route-aware retrieval probes]
-    Retrieval --> Admission[Candidate admission trace]
-    Admission --> Pack[Budgeted context pack]
-    Pack --> Agent[Smaller prompt context]
-    Agent --> Writeback[Sanitized writeback]
-    Writeback --> Store
-    Store --> Economy[Token economy metrics]
-    Store --> Maint[Maintenance suggestions]
-    Maint --> Review[Apply / dismiss with confirmation]
-    Economy --> UI[Web UI]
-    Review --> UI
+    A[You / coding agent] --> B[DysonSpherain hooks, CLI, MCP, or Web UI]
+    B --> C[Local project memory]
+    C --> D[Evidence retrieval]
+    D --> E[Budgeted context pack]
+    E --> F[Agent continues with focused context]
+    F --> G[New decisions, errors, commands, results]
+    G --> C
 
-    classDef entry fill:#edf2ff,stroke:#6b7fd7,color:#14213d;
-    classDef store fill:#eef7f1,stroke:#52946b,color:#17351f;
-    classDef core fill:#f6f7f9,stroke:#8a94a6,color:#1f2937;
-    class User,Agent entry;
-    class Store store;
-    class Entry,Intent,ProductAPI,Retrieval,Admission,Pack,Writeback,Economy,Maint,Review,UI core;
+    classDef user fill:#EEF2FF,stroke:#6366F1,color:#111827;
+    classDef memory fill:#ECFDF5,stroke:#10B981,color:#064E3B;
+    classDef pack fill:#F8FAFC,stroke:#94A3B8,color:#0F172A;
+    class A,F user;
+    class C memory;
+    class B,D,E,G pack;
 ```
 
-```mermaid
-flowchart TB
-    subgraph "Agent platforms"
-      Codex[Codex]
-      Claude[Claude Code]
-      Gemini[Gemini CLI]
-      OpenCode[OpenCode]
-      MCP[MCP-capable tools]
-    end
+DysonSpherain is not just a vector search wrapper. It is a local memory layer built around **evidence**, **retrieval traces**, **context budgeting**, **runtime events**, **privacy controls**, and **agent integration**.
 
-    Codex --> CodexConfig[.codex/config.toml + AGENTS.md]
-    Claude --> ClaudeHooks[.claude/settings.json hooks]
-    Gemini --> Manifest[.gemini/dyson-memory.json]
-    OpenCode --> Manifest
-    MCP --> Plugin[Plugin manifests]
+---
 
-    CodexConfig --> Server[dysonspherain.adapters.mcp_server]
-    ClaudeHooks --> Hooks[Claude hook commands]
-    Manifest --> Server
-    Plugin --> Server
-    Hooks --> Runtime[Runtime ledger and product memory]
-    Server --> Tools[dyson_memory_intent / recall / context_pack / product tools]
-    Tools --> Runtime
-```
+## 30-second start
 
-## Quick Start
-
-### npx / npm wrapper
-
-Use this when the package is installed from npm or from this checkout:
+### Option A — use the npm wrapper
 
 ```bash
 npx dysonspherain-memory install --project .
 npx dysonspherain-memory doctor --project .
+npx dysonspherain-memory daemon --project . --port 37777
 ```
 
-Persistent command:
+Then open:
+
+```text
+http://127.0.0.1:37777
+```
+
+### Option B — run from a cloned checkout
 
 ```bash
-npm install -g dysonspherain-memory
-dyson-memory install --project .
-dyson-memory doctor --project .
+git clone <your-dysonspherain-repo-url>
+cd DysonSpherain
+node bin/dysonspherain-memory.js install --project .
+node bin/dysonspherain-memory.js doctor --project .
+node bin/dysonspherain-memory.js daemon --project . --port 37777
 ```
 
-Plugin manifests only:
+The wrapper prepares a package-local Python runtime when needed. Use `--no-bootstrap` or `DYSON_NO_BOOTSTRAP=1` if you prefer to manage Python dependencies yourself.
+
+### Option C — Python development install
+
+```bash
+git clone <your-dysonspherain-repo-url>
+cd DysonSpherain
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[full]"
+
+dysonspherain init --project DysonSpherain
+dysonspherain doctor --json
+dysonspherain ui --project DysonSpherain --port 37777
+```
+
+Optional dependency groups:
+
+| Extra | Purpose |
+|---|---|
+| `.[mcp]` | MCP SDK transport |
+| `.[embedding]` | `sentence_transformers` semantic embeddings |
+| `.[vector]` | Chroma vector backend |
+| `.[full]` | Embedding + vector extras |
+| `.[ui-test]` | Playwright UI tests |
+| `.[encrypted]` | SQLCipher Python driver support |
+
+---
+
+## First useful commands
+
+Record an important decision:
+
+```bash
+dysonspherain remember \
+  --project DysonSpherain \
+  --type decision \
+  --text "Keep official benchmark profiles capped and artifact-backed."
+```
+
+Record a command and its output:
+
+```bash
+dysonspherain record \
+  --project DysonSpherain \
+  --source shell \
+  --command "pytest tests/test_product_memory.py" \
+  --capture-output
+```
+
+Search memory:
+
+```bash
+dysonspherain search "benchmark profile" --project DysonSpherain
+```
+
+Retrieve evidence with an auditable trace:
+
+```bash
+dysonspherain retrieve \
+  "why did benchmark performance regress?" \
+  --project DysonSpherain \
+  --show-audit \
+  --context-pack
+```
+
+Wake up a project after a long break:
+
+```bash
+dysonspherain wake \
+  --project DysonSpherain \
+  --task "resume benchmark regression repair" \
+  --max-tokens 4000
+```
+
+Launch the local UI:
+
+```bash
+dysonspherain ui --project DysonSpherain --host 127.0.0.1 --port 37777
+```
+
+---
+
+## Local Web UI
+
+DysonSpherain includes a local cockpit for people who do not want to inspect SQLite files or CLI traces manually.
+
+| Page | What it helps you do |
+|---|---|
+| Project Dashboard | See mission state, active constraints, resume context, and token savings |
+| Memory Ledger | Review runtime events and saved-token rows |
+| Situation Graph | Understand task, constraint, error, and regression relationships |
+| Evidence Search | Search stored capsules and preview retrieval traces |
+| Retrieval Trace Viewer | Inspect probes, filtered evidence, and final candidates |
+| Evidence Timeline | Browse evidence in chronological order |
+| Evidence Field Graph | Explore capsule relations and validity edges |
+| Context Composer | Build task-specific memory packs with token budgets |
+| Benchmark Lab | Track benchmark runs, artifacts, and regressions |
+| Health Doctor | Check store, index, privacy, runtime, and integration health |
+| Maintenance | Rebuild indexes and apply or dismiss duplicate/stale suggestions |
+| Settings | Configure runtime and privacy behavior |
+
+```bash
+dysonspherain ui --project DysonSpherain --port 37777
+```
+
+---
+
+## Agent integrations
+
+DysonSpherain is designed to sit beside your coding agents rather than replace them.
+
+| Agent / platform | Integration path |
+|---|---|
+| Codex | MCP config generation and `AGENTS.md` memory instructions |
+| Claude Code | Session start, prompt submit, tool use, stop, session end, and post-compact hooks |
+| Gemini CLI | Plugin manifest support |
+| OpenCode | Plugin manifest support |
+| Any MCP-capable tool | MCP server exposing recall, write, search, context pack, and health tools |
+
+Install common integrations:
+
+```bash
+npx dysonspherain-memory install --project .
+```
+
+Install plugin manifests only:
 
 ```bash
 npx dysonspherain-memory plugin install --project .
 npx dysonspherain-memory plugin print
 ```
 
-Start the local daemon through the wrapper:
+Start the MCP/local daemon path:
 
 ```bash
 npx dysonspherain-memory daemon --project . --port 37777
@@ -128,200 +239,125 @@ npx dysonspherain-memory supervisor install --project . --activate
 npx dysonspherain-memory supervisor status --project .
 ```
 
-The wrapper bootstraps a package-local Python environment when the selected
-Python cannot import DysonSpherain. Use `--no-bootstrap` or
-`DYSON_NO_BOOTSTRAP=1` to manage Python dependencies yourself.
+---
 
-### Python development install
+## What DysonSpherain remembers
 
-```bash
-# From this repository checkout:
-cd DysonSpherain
+DysonSpherain stores project evidence as local capsules and traces, including:
 
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[full]"
+- architectural decisions
+- task summaries and continuation packets
+- shell commands and captured outputs
+- benchmark runs and metrics artifacts
+- runtime events and lifecycle transitions
+- errors, regressions, and recovery notes
+- files, markdown imports, and external artifacts
+- aliases, supersession, contradiction, deprecation, and validity state
+- retrieval traces and generated context packs
+- token-economy measurements
 
-dysonspherain init --project DysonSpherain
-dysonspherain doctor --json
-```
+Memory is written under `.memory/` in your project workspace by default.
 
-Optional extras:
+---
 
-| Extra | Purpose |
+## Privacy by default
+
+DysonSpherain is local-first.
+
+| Control | Support |
 |---|---|
-| `.[mcp]` | MCP SDK transport |
-| `.[embedding]` | `sentence_transformers` semantic embeddings |
-| `.[vector]` | Chroma vector backend |
-| `.[full]` | Vector + embedding extras |
-| `.[ui-test]` | Playwright UI interaction tests |
-| `.[encrypted]` | SQLCipher Python driver support |
+| Local storage | Project memory is stored under `.memory/` |
+| Ignore rules | `.dysonignore` plus default ignores for secrets, credentials, virtualenvs, `node_modules`, and `.git` |
+| Redaction | Sensitive patterns are sanitized before durable writes |
+| Forget/export | Soft forget, hard forget, retention policies, and export manifests |
+| Encryption path | External/OS-managed marker support and optional SQLCipher migration |
+| Auditability | Retrieval traces show why evidence was selected or filtered |
 
-## Product CLI
-
-Common product commands:
+Useful commands:
 
 ```bash
-dysonspherain init --project DysonSpherain
-dysonspherain remember --project DysonSpherain --type decision --text "Keep official benchmark profiles capped."
-dysonspherain record --project DysonSpherain --source shell --command "pytest tests/test_product_memory.py" --capture-output
-dysonspherain import markdown session.md --project DysonSpherain
-dysonspherain search "benchmark profile" --project DysonSpherain
-dysonspherain retrieve "benchmark profile" --project DysonSpherain --show-audit --context-pack
-dysonspherain wake --project DysonSpherain --task "resume benchmark repair" --max-tokens 4000
-dysonspherain inspect cap_xxx --project DysonSpherain
-dysonspherain forget --capsule-id cap_xxx --project DysonSpherain
 dysonspherain export --project DysonSpherain --format json
-dysonspherain benchmark-lab record --project DysonSpherain --artifact BenchmarkResult/latest/metrics.json
-dysonspherain ui --project DysonSpherain --port 37777
+dysonspherain forget --capsule-id cap_xxx --project DysonSpherain
+dysonspherain index configure-encryption external_or_os_managed --scope project_volume
+dysonspherain index configure-encryption sqlcipher --key-env DYSON_MEMORY_SQLCIPHER_KEY --allow-unavailable
 ```
 
-Runtime hook commands:
+---
 
-```bash
-dysonspherain runtime before-task --project DysonSpherain --task "run KnowMe official profile"
-dysonspherain runtime on-error --project DysonSpherain --error-file traceback.txt
-dysonspherain runtime after-task --project DysonSpherain --summary "KnowMe rerun completed"
-dysonspherain runtime pre-compact --project DysonSpherain
-dysonspherain runtime after-benchmark --project DysonSpherain --metrics metrics.json
+## Token economy
+
+DysonSpherain estimates how many tokens are saved when a compact memory pack replaces a larger prompt history.
+
+```text
+estimated_saved_tokens = max(0, baseline_context_tokens - injected_tokens)
+saving_ratio = estimated_saved_tokens / max(1, baseline_context_tokens)
 ```
 
-Index, maintenance, and privacy commands:
+Token-economy summaries are available through the CLI, daemon API, Web UI, and benchmark artifact reports.
 
 ```bash
-dysonspherain index verify --project DysonSpherain
-dysonspherain index rebuild --project DysonSpherain
-dysonspherain index repair --project DysonSpherain
+dysonspherain evaluate-token-economy --help
+dysonspherain token-economy-final-report --help
+```
 
+---
+
+## Retrieval and context system
+
+DysonSpherain combines multiple retrieval paths to produce compact, traceable context.
+
+```mermaid
+flowchart TB
+    Q[Task or query] --> R[Route classification]
+    R --> S[Sparse / FTS probe]
+    R --> D[Dense probe]
+    R --> A[Artifact, code, entity, and temporal probes]
+    S --> C[Candidate admission]
+    D --> C
+    A --> C
+    C --> V[Validity and duplicate filtering]
+    V --> P[Context pack budgeter]
+    P --> O[Markdown / JSON / YAML / text output]
+
+    classDef query fill:#EEF2FF,stroke:#6366F1,color:#111827;
+    classDef core fill:#F8FAFC,stroke:#94A3B8,color:#0F172A;
+    classDef out fill:#ECFDF5,stroke:#10B981,color:#064E3B;
+    class Q query;
+    class R,S,D,A,C,V,P core;
+    class O out;
+```
+
+Dense retrieval supports two scale modes:
+
+| Mode | Use case |
+|---|---|
+| SQLite inline vectors | Dependency-light default for local use |
+| Chroma ANN index | Larger product-memory stores and faster vector search |
+
+Configure retrieval backends:
+
+```bash
 dysonspherain index embedding-backends --project DysonSpherain
 dysonspherain index configure-embedding local_hash_embedding
-dysonspherain index configure-embedding sentence_transformers --model sentence-transformers/all-MiniLM-L6-v2 --allow-unavailable
+dysonspherain index configure-embedding sentence_transformers \
+  --model sentence-transformers/all-MiniLM-L6-v2 \
+  --allow-unavailable
 
 dysonspherain index vector-backends --project DysonSpherain
 dysonspherain index configure-vector sqlite_inline
 dysonspherain index configure-vector chroma --allow-unavailable
 dysonspherain index rebuild-vector --project DysonSpherain
-
-dysonspherain index maintenance --project DysonSpherain
-dysonspherain index maintenance --project DysonSpherain --apply sug_xxx --canonical-id cap_xxx
-dysonspherain index maintenance --project DysonSpherain --dismiss sug_xxx --reason "not a duplicate"
-
-dysonspherain index configure-encryption external_or_os_managed --scope project_volume
-dysonspherain index configure-encryption sqlcipher --key-env DYSON_MEMORY_SQLCIPHER_KEY --allow-unavailable
-dysonspherain index migrate-sqlcipher --key-env DYSON_MEMORY_SQLCIPHER_KEY
-dysonspherain index migrate-sqlcipher --key-env DYSON_MEMORY_SQLCIPHER_KEY --replace
 ```
 
-## Web UI And Local API
+---
 
-Start the built-in local UI:
+## MCP tools
 
-```bash
-dysonspherain ui --project DysonSpherain --host 127.0.0.1 --port 37777
-```
+The MCP server exposes memory tools that agents can call directly.
 
-Open:
-
-```text
-http://127.0.0.1:37777
-```
-
-Current UI pages:
-
-| Page | Purpose |
+| Tool | Purpose |
 |---|---|
-| Project Dashboard | Mission state, active constraints, resume context, token savings |
-| Memory Ledger | Runtime events and token-savings rows |
-| Situation Graph | Event-sourced task/constraint/regression graph |
-| Evidence Search | Capsule search and retrieval trace preview |
-| Retrieval Trace Viewer | Probe counts, final candidates, filtered evidence |
-| Evidence Timeline | Time-ordered evidence capsules |
-| Evidence Field Graph | Capsule relations and validity edges |
-| Context Composer | Build task-specific context packs |
-| Benchmark Lab | Benchmark run and regression artifact dashboard |
-| Health Doctor | Store/index/privacy/runtime health checks |
-| Maintenance | Rebuild indexes, configure embedding/vector backends, apply/dismiss suggestions |
-| Settings | Runtime and privacy configuration |
-
-Useful API endpoints:
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /api/health` | Local service and product memory health |
-| `GET /api/token-economy` | Saved-token summaries and event rows |
-| `GET /api/resume-context` | Compact continuation packet |
-| `GET /api/capsules` | List product evidence capsules |
-| `POST /api/retrieve` | Retrieve evidence with admission trace and optional context pack |
-| `POST /api/context-pack` | Build a budgeted context pack |
-| `GET /api/maintenance` | List duplicate/stale benchmark suggestions |
-| `POST /api/index/rebuild` | Rebuild embeddings and product vector index |
-| `GET /api/index/embedding-backends` | Inspect embedding backend availability |
-| `GET /api/index/vector-backends` | Inspect vector backend availability |
-| `POST /api/index/configure-vector` | Configure SQLite inline or Chroma product vector backend |
-| `POST /api/index/rebuild-vector` | Rebuild the optional Chroma product ANN index |
-
-## Memory And Index Model
-
-```mermaid
-erDiagram
-    RAW_TRACES ||--o{ EVIDENCE_CAPSULES : source
-    EVIDENCE_CAPSULES ||--o{ CAPSULE_EMBEDDINGS : indexes
-    EVIDENCE_CAPSULES ||--o{ CAPSULE_RELATIONS : links
-    EVIDENCE_CAPSULES ||--o{ CAPSULE_ALIASES : canonicalizes
-    EVIDENCE_CAPSULES ||--o{ MAINTENANCE_SUGGESTIONS : reviews
-    EVIDENCE_CAPSULES ||--o{ RETRIEVAL_TRACES : recalls
-    RETRIEVAL_TRACES ||--o{ CONTEXT_PACKS : composes
-    BENCHMARK_RUNS ||--o{ MAINTENANCE_SUGGESTIONS : invalidates
-    RUNTIME_EVENTS ||--o{ CONTEXT_PACKS : wakes
-
-    EVIDENCE_CAPSULES {
-        string id
-        string project_id
-        string evidence_type
-        string validity_state
-        string title
-        string summary
-        string timestamp
-    }
-
-    CAPSULE_EMBEDDINGS {
-        string embedding_id
-        string capsule_id
-        string backend
-        string metadata_json
-    }
-
-    MAINTENANCE_SUGGESTIONS {
-        string suggestion_id
-        string suggestion_type
-        string status
-        string payload_json
-    }
-```
-
-Dense retrieval has two scale modes:
-
-```mermaid
-flowchart LR
-    Query[Query] --> Embed[Configured query embedding]
-    Embed --> Choice{Vector backend}
-    Choice -->|sqlite_inline| SQLiteScan[Scan capsule_embeddings in SQLite]
-    Choice -->|chroma| Chroma[Query .memory/indexes/product_chroma]
-    Chroma -->|missing or unavailable| SQLiteScan
-    SQLiteScan --> Candidates[Dense probe candidates]
-    Chroma --> Candidates
-    Candidates --> Fusion[Candidate admission and rerank]
-```
-
-## Agent And MCP Tools
-
-The MCP server exposes legacy observation tools and product evidence tools.
-
-Core memory tools:
-
-| Tool | Use |
-|---|---|
-| `dyson_memory_intent` | Decide whether memory should be called and recommend tools/budget |
+| `dyson_memory_intent` | Decide whether memory should be used and suggest a token budget |
 | `dyson_recall` | Retrieve compact evidence for a query |
 | `dyson_context_pack` | Build a budgeted context pack |
 | `dyson_write_memory` | Write sanitized memory with dedupe |
@@ -329,11 +365,6 @@ Core memory tools:
 | `dyson_timeline` | Inspect related events around an observation/session |
 | `dyson_get_observations` | Fetch observation details |
 | `dyson_resume_context` | Reconstruct continuation context for a new window/session |
-
-Product evidence tools:
-
-| Tool | Use |
-|---|---|
 | `dyson_product_write` | Write a product evidence capsule |
 | `dyson_product_search` | Search product capsules with retrieval trace support |
 | `dyson_product_retrieve` | Retrieve product evidence and optionally build a context pack |
@@ -343,49 +374,40 @@ Product evidence tools:
 | `dyson_product_context_pack` | Build a product context pack |
 | `dyson_health_doctor` | Run product health checks |
 
-## Token Economy
+Smoke-test the MCP path:
 
-DysonSpherain tracks estimated savings when a compact memory pack replaces a
-larger prompt history:
-
-```text
-estimated_saved_tokens = max(0, baseline_context_tokens - injected_tokens)
-saving_ratio = estimated_saved_tokens / max(1, baseline_context_tokens)
+```bash
+npx dysonspherain-memory mcp-smoke
 ```
 
-The daemon API and UI show per-conversation savings plus rolling 24h, 7d, and
-30d totals. Benchmark runners and token-economy evaluators can also write
-per-sample and summary artifacts.
+---
 
-```mermaid
-sequenceDiagram
-    participant Prompt as User prompt
-    participant Intent as dyson_memory_intent
-    participant Recall as recall/context pack
-    participant Model as Agent model
-    participant Metrics as token economy event
+## Local API
 
-    Prompt->>Intent: classify whether memory is needed
-    Intent->>Recall: recommended tools and token budget
-    Recall->>Model: compact evidence pack
-    Model->>Metrics: injected tokens and baseline estimate
-    Metrics->>Prompt: saved-token summary available in UI/API
-```
+When the daemon is running, these endpoints are available locally:
 
-## Privacy And Retention
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/health` | Service and product-memory health |
+| `GET /api/token-economy` | Saved-token summaries and rows |
+| `GET /api/resume-context` | Compact continuation packet |
+| `GET /api/capsules` | List product evidence capsules |
+| `POST /api/retrieve` | Retrieve evidence with trace and optional context pack |
+| `POST /api/context-pack` | Build a budgeted context pack |
+| `GET /api/maintenance` | List duplicate/stale benchmark suggestions |
+| `POST /api/index/rebuild` | Rebuild embeddings and product vector index |
+| `GET /api/index/embedding-backends` | Inspect embedding backend availability |
+| `GET /api/index/vector-backends` | Inspect vector backend availability |
+| `POST /api/index/configure-vector` | Configure SQLite inline or Chroma backend |
+| `POST /api/index/rebuild-vector` | Rebuild the optional Chroma product ANN index |
 
-- Local-first storage under `.memory/`.
-- `.dysonignore` plus default ignore patterns for secrets, credentials,
-  virtualenvs, `node_modules`, and `.git`.
-- Redaction before durable writes.
-- Soft forget, hard forget, retention by date/count, and export manifests.
-- External/OS-managed encryption marker support.
-- Optional SQLCipher migration when `pysqlcipher3` and
-  `DYSON_MEMORY_SQLCIPHER_KEY` are available.
+---
 
-## Validation
+## Benchmark and validation snapshot
 
-Benchmark snapshot from the latest local full-run artifacts:
+The repository tracks benchmark artifacts and smoke checks so memory behavior can be evaluated instead of only described.
+
+Latest local full-run artifact snapshot included in the current project materials:
 
 | Benchmark | Questions | Time | Final R@10 | Final NDCG@10 | Candidate R@100 |
 |---|---:|---:|---:|---:|---:|
@@ -395,18 +417,15 @@ Benchmark snapshot from the latest local full-run artifacts:
 | CloneMem | 2,374 | 18m 47s | 0.0953 | 0.0750 | 0.3438 |
 | ConvoMem | 1,986 | 2m 35s | n/a | n/a | n/a |
 
-Sources: `BenchmarkResult/full_trend_other_benchmarks_20260501_015200`,
-`BenchmarkResult/knowme_official_formal_full_20260501_011900`, and
-`reports/formal_protocol_validation.md`. ConvoMem currently records a
-conversation-memory runtime artifact rather than the same retrieval metrics.
+ConvoMem currently records a conversation-memory runtime artifact rather than the same retrieval metrics. Full benchmark datasets are not bundled with the repository.
 
-Product smoke:
+Run product smoke checks:
 
 ```bash
 python scripts/product_acceptance_smoke.py --output reports/product_acceptance_smoke.json
 ```
 
-Focused product tests:
+Focused tests:
 
 ```bash
 python -m pytest \
@@ -418,7 +437,7 @@ python -m pytest \
   tests/test_codex_config_generation.py -q
 ```
 
-Optional UI and Chroma validation:
+Optional UI and vector validation:
 
 ```bash
 python -m pip install -e ".[ui-test]"
@@ -429,23 +448,9 @@ python -m pip install -e ".[full]"
 python -m pytest tests/test_product_chroma_vector.py -q
 ```
 
-The repository includes a GitHub Actions workflow at
-`.github/workflows/product.yml` with a product smoke/UI lane and a Chroma-backed
-vector lane.
+---
 
-Recent product smoke checks include:
-
-| Check | Meaning |
-|---|---|
-| `dense_probe_available` | Product dense probe returns candidates |
-| `embedding_backend_registry` | Embedding backend registry/config works |
-| `vector_backend_registry` | SQLite/Chroma vector backend registry works |
-| `maintenance_apply` | Duplicate/stale suggestions can be applied |
-| `encryption_status_reported` | Privacy API reports encryption state |
-| `retrieval_trace_saved` | Retrieval writes an auditable trace |
-| `wake_context_pack` | Context pack generation works |
-
-## Repository Layout
+## Repository layout
 
 ```text
 .
@@ -460,23 +465,27 @@ Recent product smoke checks include:
 ├── docs/                           # Product, API, privacy, integration notes
 ├── scripts/                        # Smoke, reports, evaluation utilities
 ├── tests/                          # Product, adapter, runtime, benchmark tests
-├── web/                            # Optional Next.js frontend assets
+├── web/                            # Optional frontend assets
 ├── .codex-plugin/                  # Codex plugin manifest
 ├── .claude-plugin/                 # Claude plugin manifest
+├── .gemini/                        # Gemini CLI manifest
+├── .opencode/                      # OpenCode manifest
 ├── .github/workflows/product.yml   # Product CI lanes
 ├── package.json                    # npm quick-start wrapper
 └── pyproject.toml                  # Python package metadata
 ```
 
-## Boundaries
+---
 
-- Product memory and benchmark retrieval are currently separate unless a runner
-  explicitly calls product APIs.
+## Operational notes
+
+- Product memory and benchmark retrieval are separate unless a runner explicitly calls product APIs.
 - Token savings are estimates from recorded token fields, not billing invoices.
-- SQLite inline vectors are dependency-free; Chroma is recommended for larger
-  product stores.
+- SQLite inline vectors are dependency-light; Chroma is recommended for larger product stores.
 - SQLCipher support requires optional dependencies and an operator-provided key.
-- Full benchmark datasets are not bundled with the repository.
+- Full benchmark datasets are not included in the repository.
+
+---
 
 ## License
 
