@@ -30,6 +30,15 @@ paper/figures/data/
 base/benchmarks/.cache/
 base/**/.cache/
 
+# Paper, draft, and revision prose should stay out of GitHub
+paper/**/*.md
+paper/*.md
+draft*.md
+*draft*.md
+*revision*.md
+*revison*.md
+REVISION_SUMMARY.md
+
 # Runtime files
 *.sqlite3
 *.sqlite
