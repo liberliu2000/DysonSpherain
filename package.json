@@ -1,6 +1,6 @@
 {
   "name": "@liberliu/dysonspherain-memory",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Quick-start wrapper for DysonSpherain MCP memory, hooks, plugins, and token economy diagnostics.",
   "license": "GPL-3.0-or-later",
   "type": "commonjs",
@@ -22,6 +22,16 @@
     "LICENSE",
     "pyproject.toml",
     "docs/",
+    "figures/token_savings_demo.svg",
+    "web/.eslintrc.json",
+    "web/app/",
+    "web/components/",
+    "web/lib/",
+    "web/next-env.d.ts",
+    "web/next.config.mjs",
+    "web/package.json",
+    "web/package-lock.json",
+    "web/tsconfig.json",
     "README.md"
   ],
   "scripts": {

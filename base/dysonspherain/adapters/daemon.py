@@ -13,27 +13,43 @@ from dysonspherain.memory_runtime.runtime import cockpit_snapshot, graph_state
 from dysonspherain.memory_runtime.scheduler import enqueue_maintenance_jobs, load_pending_jobs, run_scheduler_once
 from dysonspherain.product import (
     apply_maintenance_suggestion,
+    commit_compaction_result,
     configure_embedding_backend,
     configure_encryption,
     configure_product_vector_backend,
     create_context_pack,
+    create_compaction_result,
     dismiss_maintenance_suggestion,
     doctor as product_doctor,
+    find_compaction_candidates,
+    forget_capsule,
     get_capsule,
     get_context_pack,
+    get_compaction_result,
     get_retrieval_trace,
+    get_supersession_chain,
+    inspect_retrieval,
+    lifecycle_audit,
     list_benchmark_runs,
     list_capsules,
     list_projects,
     maintenance_suggestions,
+    memory_lifecycle_summary,
+    migrate_lifecycle_metadata,
+    mark_deprecated,
+    mark_contradicted,
+    mark_superseded,
     privacy_policy,
     product_embedding_backends,
     product_vector_backends,
     rebuild_product_embeddings,
     rebuild_product_vector_index,
+    reject_compaction_result,
     remember,
     retrieve,
+    run_deterministic_compaction,
     update_capsule,
+    verify_compaction_result_record,
 )
 
 
@@ -545,7 +561,7 @@ class DysonMemoryHandler(BaseHTTPRequestHandler):
                 self._html()
             elif parsed.path == "/api/projects":
                 self._send(list_projects(self.base_dir))
-            elif parsed.path == "/api/capsules":
+            elif parsed.path in {"/api/capsules", "/api/memory/list"}:
                 self._send(
                     list_capsules(
                         self.base_dir,
@@ -556,9 +572,26 @@ class DysonMemoryHandler(BaseHTTPRequestHandler):
                         evidence_type=query.get("type", [None])[0],
                     )
                 )
+            elif parsed.path == "/api/memory/summary":
+                self._send(memory_lifecycle_summary(self.base_dir, project_id=project, limit=int(query.get("limit", ["80"])[0])))
             elif parsed.path.startswith("/api/capsules/"):
                 capsule_id = parsed.path.rsplit("/", 1)[-1]
                 self._send({"status": "ok", "capsule": get_capsule(self.base_dir, capsule_id, project_id=project)})
+            elif parsed.path.startswith("/api/memory/") and parsed.path.endswith("/sources"):
+                capsule_id = parsed.path.split("/")[-2]
+                cap = get_capsule(self.base_dir, capsule_id, project_id=project)
+                self._send({"status": "ok", "memory_id": capsule_id, "source_ids": cap.get("metadata", {}).get("source_ids") or cap.get("parent_ids") or [], "raw_ref": cap.get("raw_ref"), "file_refs": cap.get("file_refs") or [], "artifact_refs": cap.get("artifact_refs") or []})
+            elif parsed.path.startswith("/api/memory/") and parsed.path.endswith("/audit"):
+                capsule_id = parsed.path.split("/")[-2]
+                audit = lifecycle_audit(self.base_dir, project_id=project, limit=int(query.get("limit", ["50"])[0]))
+                audit["events"] = [event for event in audit["events"] if capsule_id in json.dumps(event.get("payload") or {}, ensure_ascii=False)]
+                self._send(audit)
+            elif parsed.path.startswith("/api/memory/") and parsed.path.endswith("/supersession-chain"):
+                capsule_id = parsed.path.split("/")[-2]
+                self._send(get_supersession_chain(self.base_dir, capsule_id, project_id=project))
+            elif parsed.path.startswith("/api/memory/"):
+                capsule_id = parsed.path.rsplit("/", 1)[-1]
+                self._send({"status": "ok", "memory": get_capsule(self.base_dir, capsule_id, project_id=project)})
             elif parsed.path.startswith("/api/retrieval-traces/"):
                 trace_id = parsed.path.rsplit("/", 1)[-1]
                 self._send(get_retrieval_trace(self.base_dir, trace_id, project_id=project))
@@ -569,6 +602,27 @@ class DysonMemoryHandler(BaseHTTPRequestHandler):
                 self._send(list_benchmark_runs(self.base_dir, project_id=project, limit=int(query.get("limit", ["50"])[0])))
             elif parsed.path == "/api/maintenance":
                 self._send(maintenance_suggestions(self.base_dir, project_id=project, limit=int(query.get("limit", ["100"])[0])))
+            elif parsed.path == "/api/lifecycle/summary":
+                self._send(memory_lifecycle_summary(self.base_dir, project_id=project, limit=int(query.get("limit", ["80"])[0])))
+            elif parsed.path in {"/api/lifecycle/compaction-candidates", "/api/compaction/clusters"}:
+                config = load_runtime_config(self.base_dir).to_dict().get("compaction_config", {})
+                self._send(
+                    find_compaction_candidates(
+                        self.base_dir,
+                        project_id=project,
+                        limit=int(query.get("limit", ["12"])[0]),
+                        near_duplicate_threshold=float(query.get("near_duplicate_threshold", [config.get("near_duplicate_threshold", 0.9)])[0]),
+                        min_cluster_size=int(query.get("min_cluster_size", [config.get("min_cluster_size", 2)])[0]),
+                    )
+                )
+            elif parsed.path == "/api/lifecycle/audit":
+                self._send(lifecycle_audit(self.base_dir, project_id=project, limit=int(query.get("limit", ["30"])[0])))
+            elif parsed.path.startswith("/api/compaction/results/"):
+                result_id = parsed.path.rsplit("/", 1)[-1]
+                self._send(get_compaction_result(self.base_dir, result_id=result_id, project_id=project))
+            elif parsed.path == "/api/llm/providers":
+                config = load_runtime_config(self.base_dir).to_dict()
+                self._send({"status": "ok", "providers": ["auto", "codex", "claude", "openai_compatible", "custom", "disabled"], "default": config.get("llm_config", {}).get("provider", "auto"), "external_llm_enabled": bool(config.get("llm_config", {}).get("external_llm_enabled"))})
             elif parsed.path == "/api/index/embedding-backends":
                 self._send(product_embedding_backends(self.base_dir))
             elif parsed.path == "/api/index/vector-backends":
@@ -690,6 +744,17 @@ class DysonMemoryHandler(BaseHTTPRequestHandler):
                         include_debug_trace=self._bool(payload.get("include_debug_trace"), False),
                     )
                 )
+            elif parsed.path == "/api/retrieval/inspect":
+                self._send(
+                    inspect_retrieval(
+                        self.base_dir,
+                        project_id=project,
+                        query=str(payload.get("query") or ""),
+                        limit=int(payload.get("limit") or 10),
+                        max_tokens=int(payload.get("max_tokens") or 2000),
+                        task_type=payload.get("task_type"),
+                    )
+                )
             elif parsed.path == "/api/context-pack":
                 self._send(
                     create_context_pack(
@@ -737,6 +802,66 @@ class DysonMemoryHandler(BaseHTTPRequestHandler):
                         reason=payload.get("reason"),
                     )
                 )
+            elif parsed.path in {"/api/lifecycle/compact"} or (parsed.path.startswith("/api/compaction/clusters/") and parsed.path.endswith("/run")):
+                cluster_id = payload.get("cluster_id")
+                if not cluster_id and parsed.path.startswith("/api/compaction/clusters/"):
+                    cluster_id = parsed.path.split("/")[-2]
+                if parsed.path.startswith("/api/compaction/clusters/"):
+                    self._send(
+                        create_compaction_result(
+                            self.base_dir,
+                            project_id=project,
+                            cluster_id=cluster_id,
+                            memory_ids=[str(item) for item in payload.get("memory_ids") or []],
+                            mode=str(payload.get("mode") or "local_semantic"),
+                            verifier=str(payload.get("verifier") or "ui"),
+                            confirm_external_call=self._bool(payload.get("confirm_external_call"), False),
+                        )
+                    )
+                    return
+                self._send(
+                    run_deterministic_compaction(
+                        self.base_dir,
+                        project_id=project,
+                        cluster_id=cluster_id,
+                        memory_ids=[str(item) for item in payload.get("memory_ids") or []],
+                        mode=str(payload.get("mode") or "deterministic"),
+                        verifier=str(payload.get("verifier") or "system"),
+                    )
+                )
+            elif parsed.path.startswith("/api/compaction/results/") and parsed.path.endswith("/verify"):
+                result_id = parsed.path.split("/")[-2]
+                self._send(verify_compaction_result_record(self.base_dir, result_id=result_id, project_id=project))
+            elif parsed.path.startswith("/api/compaction/results/") and parsed.path.endswith("/commit"):
+                result_id = parsed.path.split("/")[-2]
+                self._send(commit_compaction_result(self.base_dir, result_id=result_id, project_id=project, allow_needs_review=self._bool(payload.get("allow_needs_review"), False)))
+            elif parsed.path.startswith("/api/compaction/results/") and parsed.path.endswith("/reject"):
+                result_id = parsed.path.split("/")[-2]
+                self._send(reject_compaction_result(self.base_dir, result_id=result_id, project_id=project, reason=payload.get("reason")))
+            elif parsed.path.startswith("/api/memory/") and parsed.path.endswith("/mark-superseded"):
+                capsule_id = parsed.path.split("/")[-2]
+                self._send(mark_superseded(self.base_dir, capsule_id, str(payload.get("by") or payload.get("by_capsule_id") or ""), reason=payload.get("reason")))
+            elif parsed.path.startswith("/api/memory/") and parsed.path.endswith("/mark-deprecated"):
+                capsule_id = parsed.path.split("/")[-2]
+                self._send(mark_deprecated(self.base_dir, capsule_id, reason=payload.get("reason")))
+            elif parsed.path.startswith("/api/memory/") and parsed.path.endswith("/mark-contradicted"):
+                capsule_id = parsed.path.split("/")[-2]
+                self._send(mark_contradicted(self.base_dir, capsule_id, str(payload.get("by") or payload.get("by_capsule_id") or ""), reason=payload.get("reason")))
+            elif parsed.path.startswith("/api/memory/") and parsed.path.endswith("/reactivate"):
+                capsule_id = parsed.path.split("/")[-2]
+                self._send(update_capsule(self.base_dir, capsule_id, project_id=project, updates={"validity_state": "active", "metadata": {"lifecycle_reason": payload.get("reason") or "reactivated from Memory Cockpit"}}))
+            elif parsed.path.startswith("/api/memory/") and parsed.path.endswith("/archive"):
+                capsule_id = parsed.path.split("/")[-2]
+                self._send(forget_capsule(self.base_dir, capsule_id=capsule_id, project_id=project, hard=False))
+            elif parsed.path == "/api/llm/test-provider":
+                config = load_runtime_config(self.base_dir).to_dict().get("llm_config", {})
+                provider = str(payload.get("provider") or config.get("provider") or "auto")
+                external = bool(payload.get("external_llm_enabled", config.get("external_llm_enabled", False)))
+                local_only = bool(payload.get("local_only", config.get("local_only", True)))
+                ok = provider in {"auto", "codex", "claude", "disabled"} or (external and not local_only and bool(payload.get("api_key") or config.get("api_key")))
+                self._send({"status": "ok" if ok else "unconfigured", "provider": provider, "external_llm_enabled": external, "local_only": local_only, "message": "Local/existing-agent provider is available as a configuration target." if ok else "External provider requires explicit API configuration."})
+            elif parsed.path == "/api/migrate/lifecycle":
+                self._send(migrate_lifecycle_metadata(self.base_dir, project_id=project, backup=self._bool(payload.get("backup"), True)))
             elif parsed.path in {"/api/settings", "/api/runtime/config"}:
                 self._send(save_runtime_config(self.base_dir, dict(payload), project=project))
             elif parsed.path == "/api/runtime/scheduler/enqueue":

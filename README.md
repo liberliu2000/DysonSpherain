@@ -41,7 +41,7 @@ You ask the agent to continue — and DysonSpherain provides the evidence.
 | Less prompt repetition | Compact evidence packs instead of full chat history |
 | Safer agent continuation | Decisions, constraints, errors, commands, and artifacts are stored as auditable evidence |
 | Multi-agent compatibility | Codex, Claude Code hooks, Gemini CLI, OpenCode, and generic MCP tools |
-| A usable interface | Local Web UI for search, timeline, benchmark lab, context composer, health checks, and settings |
+| A usable interface | Memory OS Cockpit for token savings, memory review/editing, lifecycle states, retrieval explanation, compaction review, and settings |
 | Control over data | `.memory/` local storage, `.dysonignore`, redaction, retention, export, and forget commands |
 | Measurable efficiency | Token-economy reports estimate context saved by memory recall |
 
@@ -67,7 +67,7 @@ flowchart LR
     class B,D,E,G pack;
 ```
 
-DysonSpherain is not just a vector search wrapper. It is a local memory layer built around **evidence**, **retrieval traces**, **context budgeting**, **runtime events**, **privacy controls**, and **agent integration**.
+DysonSpherain is not just a vector search wrapper. It is a local memory layer built around **evidence**, **retrieval traces**, **context budgeting**, **memory lifecycle management**, **privacy controls**, and **agent integration**.
 
 ---
 
@@ -186,26 +186,24 @@ dysonspherain ui --project DysonSpherain --host 127.0.0.1 --port 37777
 
 DysonSpherain includes a local cockpit for people who do not want to inspect SQLite files or CLI traces manually.
 
-| Page | What it helps you do |
+| Area | What it helps you do |
 |---|---|
-| Project Dashboard | See mission state, active constraints, resume context, and token savings |
-| Memory Ledger | Review runtime events and saved-token rows |
-| Situation Graph | Understand task, constraint, error, and regression relationships |
-| Evidence Search | Search stored capsules and preview retrieval traces |
-| Retrieval Trace Viewer | Inspect probes, filtered evidence, and final candidates |
-| Evidence Timeline | Browse evidence in chronological order |
-| Evidence Field Graph | Explore capsule relations and validity edges |
-| Context Composer | Build task-specific memory packs with token budgets |
-| Benchmark Lab | Track benchmark runs, artifacts, and regressions |
-| Health Doctor | Check store, index, privacy, runtime, and integration health |
-| Maintenance | Rebuild indexes and apply or dismiss duplicate/stale suggestions |
-| Settings | Configure runtime and privacy behavior |
+| Token savings | See saved tokens for the past hour, 24 hours, 7 days, and total, with a 7-day trend chart |
+| Calculation explainer | Understand the saved-token formula used by the local ledger |
+| Memory Lifecycle | Review active, stable, canonical, compacted, superseded, deprecated, contradicted, and archived states |
+| Memory Explorer | Search, filter, sort, view, and edit existing memories without leaving the browser |
+| Retrieval Inspector | Ask why a memory was selected or excluded and inspect pipeline counts |
+| Compaction Review | Preview, verify, commit, or reject compaction results while preserving raw memories |
+| Supersession & Conflict Review | Mark memories as superseded, deprecated, contradicted, archived, or reactivated |
+| LLM & Privacy Settings | Configure optional external LLM access, local-only mode, raw-memory permissions, and scoring/lifecycle weights |
 
 ```bash
 dysonspherain ui --project DysonSpherain --port 37777
 ```
 
 The Next.js dashboard in `web/` presents the product-facing console. It shows saved tokens for the past hour, past 24 hours, past 7 days, and total recorded prompt-token savings, plus a 7-day trend chart and the calculation rule used for the estimate. The page defaults to English and can switch to Chinese from the top-right language control. Benchmark content is intentionally not shown in the Web UI.
+
+External LLM compaction is **off by default**. A compaction run uses an external provider only when the user enables external LLM access, enables LLM compaction, turns off local-only mode, and confirms the individual run in the UI. Deterministic and local semantic compaction work without any external provider.
 
 ---
 
@@ -263,6 +261,7 @@ DysonSpherain stores project evidence as local capsules and traces, including:
 - errors, regressions, and recovery notes
 - files, markdown imports, and external artifacts
 - aliases, supersession, contradiction, deprecation, and validity state
+- canonical compacted memories with preserved raw source IDs
 - retrieval traces and generated context packs
 - token-economy measurements
 
@@ -299,8 +298,8 @@ dysonspherain index configure-encryption sqlcipher --key-env DYSON_MEMORY_SQLCIP
 DysonSpherain estimates how many tokens are saved when a compact memory pack replaces a larger prompt history.
 
 ```text
-estimated_saved_tokens = max(0, baseline_context_tokens - final_injected_tokens)
-saving_ratio = estimated_saved_tokens / max(1, baseline_context_tokens)
+estimated_saved_tokens = max(0, original_context_tokens - final_memory_pack_tokens - retrieval_overhead_tokens)
+saving_ratio = estimated_saved_tokens / max(1, original_context_tokens)
 ```
 
 Token-economy summaries are available through the CLI, daemon API, Web UI, and artifact reports. The runtime records a standard ledger event per injection with adapter, task type, mode, decision, risk, baseline type, candidate tokens, final injected tokens, duplicate ratio, tokenizer fallback state, source files, and quality guard status.
@@ -320,15 +319,47 @@ dysonspherain token-economy-final-report --help
 
 Reports separate LLM prompt token saving from local compute saving. Cache hit rates and local runtime savings are useful diagnostics, but they are not added to prompt-token savings.
 
-Current diagnostic artifacts:
+Current UI/demo data:
 
-| Artifact | Scope | Key data |
-|---|---|---|
-| `artifacts/token_economy_upgrade_smoke` | Smoke validation | 48 samples, 0 tokenizer fallbacks, mean saved-token ratio 0.8998 |
-| `artifacts/token_economy_full_compare_diagnostic` | Existing full-compare artifact rollup | 192 samples across LongMemEval, LoCoMo, KnowMe, CloneMem; estimated saved prompt tokens 293232; aggregate saved ratio 0.7287 |
-| `artifacts/tokenizer_calibration.json` | Tokenizer calibration sample | 7 samples, 0 missing references, default correction factor 0.9853 |
+| Window | Events | Baseline tokens | Injected tokens | Saved tokens | Saved ratio |
+|---|---:|---:|---:|---:|---:|
+| Past 1 hour | 2 | 7,800 | 2,700 | 5,100 | 65.4% |
+| Past 24 hours | 5 | 19,739 | 6,928 | 12,811 | 64.9% |
+| Past 7 days | 8 | 42,039 | 15,428 | 26,611 | 63.3% |
+| Total demo ledger | 8 | 42,039 | 15,428 | 26,611 | 63.3% |
 
-These artifacts are diagnostic and reproducibility aids. Use full benchmark reports for retrieval-quality claims.
+![Token savings demo](figures/token_savings_demo.svg)
+
+The current UI/demo summary is stored in `docs/demo_data/ui_memory_lifecycle_demo_summary.json`, with local runtime artifacts under `artifacts/ui_memory_lifecycle_demo/`. It also includes lifecycle-state coverage for Memory Explorer and Supersession & Conflict Review: `active=7`, `stable=3`, `canonical=1`, `compacted=3`, `superseded=1`, `deprecated=1`, `contradicted=1`, and `archived=1`. Compaction review has at least one pending local candidate, and the external LLM compaction path has been verified through a local OpenAI-compatible mock while the default saved configuration remains local-only.
+
+These artifacts are diagnostic and reproducibility aids, not a billing report.
+
+---
+
+## Memory lifecycle and compaction
+
+DysonSpherain treats memory as an auditable lifecycle instead of a flat note list.
+
+| State | Meaning |
+|---|---|
+| `active` / `stable` | Eligible for retrieval by default |
+| `canonical` | Consolidated memory created from reviewed compaction |
+| `compacted` | Raw source memory preserved after being folded into a canonical record |
+| `superseded` / `deprecated` / `contradicted` | Traceable but excluded from default retrieval |
+| `archived` | Hidden from normal views unless explicitly included |
+
+Useful commands:
+
+```bash
+dysonspherain memory summary --project DysonSpherain
+dysonspherain memory list --project DysonSpherain --state active
+dysonspherain retrieval inspect "why was this memory selected?" --project DysonSpherain
+dysonspherain compaction candidates --project DysonSpherain
+dysonspherain compaction run <cluster_id> --project DysonSpherain --mode local_semantic
+dysonspherain settings show --project DysonSpherain
+```
+
+Compaction is reviewable by default: candidates produce a preview, the verifier checks source preservation and output size, and the user can commit or reject the result. Committing creates a canonical memory and marks raw sources as `compacted`; raw records are not destroyed.
 
 ---
 
@@ -430,24 +461,18 @@ When the daemon is running, these endpoints are available locally:
 | `GET /api/index/vector-backends` | Inspect vector backend availability |
 | `POST /api/index/configure-vector` | Configure SQLite inline or Chroma backend |
 | `POST /api/index/rebuild-vector` | Rebuild the optional Chroma product ANN index |
+| `GET /api/lifecycle/summary` | Memory lifecycle counts, records, and retrieval policy |
+| `POST /api/retrieval/inspect` | Explain selected and excluded memories for a query |
+| `GET /api/compaction/clusters` | List duplicate or near-duplicate compaction candidates |
+| `POST /api/compaction/clusters/{cluster_id}/run` | Create a reviewable compaction preview |
+| `POST /api/compaction/results/{result_id}/verify` | Re-run compaction verification |
+| `POST /api/compaction/results/{result_id}/commit` | Commit a verified canonical memory |
+| `POST /api/compaction/results/{result_id}/reject` | Reject a compaction preview |
+| `GET /api/llm/providers` | Inspect supported local/external LLM configuration targets |
 
 ---
 
-## Benchmark and validation snapshot
-
-The repository tracks benchmark artifacts and smoke checks so memory behavior can be evaluated instead of only described.
-
-Latest local full-run artifact snapshot included in the current project materials:
-
-| Benchmark | Questions | Time | Final R@10 | Final NDCG@10 | Candidate R@100 |
-|---|---:|---:|---:|---:|---:|
-| LongMemEval | 500 | 2m 06s | 0.9778 | 0.9259 | 1.0000 |
-| LoCoMo | 1,986 | 4m 17s | 0.9067 | 0.7531 | 1.0000 |
-| KnowMe official/formal | 1,010 | 8m 21s | 0.5983 | 0.5047 | 0.7245 |
-| CloneMem | 2,374 | 18m 47s | 0.0953 | 0.0750 | 0.3438 |
-| ConvoMem | 1,986 | 2m 35s | n/a | n/a | n/a |
-
-ConvoMem currently records a conversation-memory runtime artifact rather than the same retrieval metrics. Full benchmark datasets are not bundled with the repository.
+## Validation
 
 Run product smoke checks:
 

@@ -97,6 +97,9 @@ runtime_app = typer.Typer(help="Product runtime event commands")
 benchmark_lab_app = typer.Typer(help="Product benchmark lab commands")
 product_index_app = typer.Typer(help="Product index maintenance commands")
 import_app = typer.Typer(help="Product import commands")
+compaction_app = typer.Typer(help="Product memory compaction commands")
+settings_app = typer.Typer(help="Product runtime settings commands")
+retrieval_app = typer.Typer(help="Product retrieval inspection commands")
 
 app.add_typer(remember_app, name="remember")
 app.add_typer(memory_app, name="memory")
@@ -118,6 +121,9 @@ app.add_typer(runtime_app, name="runtime")
 app.add_typer(benchmark_lab_app, name="benchmark-lab")
 app.add_typer(product_index_app, name="index")
 app.add_typer(import_app, name="import")
+app.add_typer(compaction_app, name="compaction")
+app.add_typer(settings_app, name="settings")
+app.add_typer(retrieval_app, name="retrieval")
 
 console = Console()
 _RUNTIME_OVERRIDES: dict[str, object] = {}
@@ -815,6 +821,69 @@ def memory_inspect(
     console.print_json(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+@memory_app.command("summary")
+def memory_product_summary(
+    project: str = typer.Option("DysonSpherain", "--project", help="Project id"),
+    limit: int = typer.Option(80, "--limit", min=1, max=300),
+) -> None:
+    from dysonspherain.product import memory_lifecycle_summary
+
+    console.print_json(json.dumps(memory_lifecycle_summary(Path.cwd(), project_id=project, limit=limit), ensure_ascii=False, indent=2))
+
+
+@memory_app.command("mark-superseded")
+def memory_product_mark_superseded(
+    old_id: str = typer.Argument(..., help="Old memory/capsule id"),
+    by: str = typer.Option(..., "--by", help="Newer active memory/capsule id"),
+    reason: str = typer.Option("", "--reason", help="Reason for supersession"),
+) -> None:
+    from dysonspherain.product import mark_superseded
+
+    console.print_json(json.dumps(mark_superseded(Path.cwd(), old_id, by, reason=reason or None), ensure_ascii=False, indent=2))
+
+
+@memory_app.command("mark-deprecated")
+def memory_product_mark_deprecated(
+    memory_id: str = typer.Argument(..., help="Memory/capsule id"),
+    reason: str = typer.Option("", "--reason", help="Reason for deprecation"),
+) -> None:
+    from dysonspherain.product import mark_deprecated
+
+    console.print_json(json.dumps(mark_deprecated(Path.cwd(), memory_id, reason=reason or None), ensure_ascii=False, indent=2))
+
+
+@memory_app.command("product-inspect")
+def memory_product_inspect(
+    memory_id: str = typer.Argument(..., help="Product capsule id"),
+    project: str = typer.Option("DysonSpherain", "--project", help="Project id"),
+) -> None:
+    from dysonspherain.product import get_capsule, get_supersession_chain
+
+    payload = {"status": "ok", "memory": get_capsule(Path.cwd(), memory_id, project_id=project), "supersession": get_supersession_chain(Path.cwd(), memory_id, project_id=project)}
+    console.print_json(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@memory_app.command("retrieval-inspect")
+def memory_product_retrieval_inspect(
+    query: str = typer.Argument(..., help="Retrieval query"),
+    project: str = typer.Option("DysonSpherain", "--project", help="Project id"),
+    limit: int = typer.Option(10, "--limit", min=1, max=100),
+) -> None:
+    from dysonspherain.product import inspect_retrieval
+
+    console.print_json(json.dumps(inspect_retrieval(Path.cwd(), project_id=project, query=query, limit=limit), ensure_ascii=False, indent=2))
+
+
+@memory_app.command("migrate-lifecycle")
+def memory_product_migrate_lifecycle(
+    project: Optional[str] = typer.Option(None, "--project", help="Project id"),
+    backup: bool = typer.Option(True, "--backup/--no-backup", help="Create SQLite backup before migration"),
+) -> None:
+    from dysonspherain.product import migrate_lifecycle_metadata
+
+    console.print_json(json.dumps(migrate_lifecycle_metadata(Path.cwd(), project_id=project, backup=backup), ensure_ascii=False, indent=2))
+
+
 @memory_app.command("update")
 def memory_update(
     memory_id: str = typer.Argument(..., help="Project memory id"),
@@ -856,7 +925,23 @@ def memory_list(
     project: Optional[str] = typer.Option(None),
     scope: Optional[str] = typer.Option(None),
     molecular_type: Optional[str] = typer.Option(None, "--molecular-type"),
+    state: Optional[str] = typer.Option(None, "--state", help="Product lifecycle state filter"),
+    product: bool = typer.Option(False, "--product", help="List product evidence capsules instead of legacy memory nodes"),
 ) -> None:
+    if state or product:
+        from dysonspherain.product import list_capsules
+
+        payload = list_capsules(Path.cwd(), project_id=project or "DysonSpherain", limit=limit)
+        rows = [row for row in payload.get("capsules", []) if not state or row.get("validity_state") == state or (state == "canonical" and row.get("evidence_type") == "canonical")]
+        table = Table(title=f"Product Memories: {project or 'DysonSpherain'}")
+        table.add_column("id")
+        table.add_column("state")
+        table.add_column("type")
+        table.add_column("title")
+        for row in rows[:limit]:
+            table.add_row(str(row.get("id") or ""), str(row.get("validity_state") or ""), str(row.get("evidence_type") or ""), str(row.get("title") or "")[:90])
+        console.print(table)
+        return
     _, storage, _, *_ = build_services()
     clauses: list[str] = []
     params: list[object] = []
@@ -3045,6 +3130,82 @@ def _render_ingest_results(results: list, title: str) -> None:
         table.add_row(r.path, r.node_id, r.status, r.detected_kind, r.cell, str(r.chunk_count))
     console.print(table)
     print(f"[green]Processed:[/green] {len(results)} files")
+
+
+@compaction_app.command("candidates")
+def compaction_candidates(
+    project: str = typer.Option("DysonSpherain", "--project", help="Project id"),
+    limit: int = typer.Option(12, "--limit", min=1, max=50),
+) -> None:
+    from dysonspherain.product import find_compaction_candidates
+
+    console.print_json(json.dumps(find_compaction_candidates(Path.cwd(), project_id=project, limit=limit), ensure_ascii=False, indent=2))
+
+
+@compaction_app.command("run")
+def compaction_run(
+    cluster_id: str = typer.Argument(..., help="Compaction cluster id"),
+    project: str = typer.Option("DysonSpherain", "--project", help="Project id"),
+    mode: str = typer.Option("local_semantic", "--mode", help="deterministic, local_semantic, or hybrid"),
+    commit: bool = typer.Option(False, "--commit", help="Commit immediately after verifier passes"),
+) -> None:
+    from dysonspherain.product import commit_compaction_result, create_compaction_result
+
+    created = create_compaction_result(Path.cwd(), project_id=project, cluster_id=cluster_id, mode=mode, verifier="cli")
+    if commit and created["result"].get("verifier_passed"):
+        created = commit_compaction_result(Path.cwd(), result_id=created["result"]["result_id"], project_id=project)
+    console.print_json(json.dumps(created, ensure_ascii=False, indent=2))
+
+
+@settings_app.command("show")
+def settings_show() -> None:
+    from dysonspherain.memory_runtime.config import load_runtime_config
+
+    payload = load_runtime_config(Path.cwd()).to_dict()
+    if payload.get("llm_config", {}).get("api_key"):
+        payload["llm_config"]["api_key"] = "***redacted***"
+    console.print_json(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@settings_app.command("set")
+def settings_set(
+    key: str = typer.Argument(..., help="Dotted key such as compaction_config.mode or llm_config.provider"),
+    value: str = typer.Argument(..., help="New value"),
+    project: str = typer.Option("DysonSpherain", "--project", help="Project id"),
+) -> None:
+    from dysonspherain.memory_runtime.config import save_runtime_config
+
+    parts = key.split(".", 1)
+    if len(parts) == 1:
+        patch: dict[str, object] = {key: value}
+    else:
+        raw: object = value
+        if value.lower() in {"true", "false"}:
+            raw = value.lower() == "true"
+        else:
+            try:
+                raw = int(value)
+            except ValueError:
+                try:
+                    raw = float(value)
+                except ValueError:
+                    raw = value
+        patch = {parts[0]: {parts[1]: raw}}
+    payload = save_runtime_config(Path.cwd(), patch, project=project)
+    if payload.get("config", {}).get("llm_config", {}).get("api_key"):
+        payload["config"]["llm_config"]["api_key"] = "***redacted***"
+    console.print_json(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@retrieval_app.command("inspect")
+def retrieval_inspect_command(
+    query: str = typer.Argument(..., help="Retrieval query"),
+    project: str = typer.Option("DysonSpherain", "--project", help="Project id"),
+    limit: int = typer.Option(10, "--limit", min=1, max=100),
+) -> None:
+    from dysonspherain.product import inspect_retrieval
+
+    console.print_json(json.dumps(inspect_retrieval(Path.cwd(), project_id=project, query=query, limit=limit), ensure_ascii=False, indent=2))
 
 
 def _join_searchable_parts(parts: list[str | None]) -> str:

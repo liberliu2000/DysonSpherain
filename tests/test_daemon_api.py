@@ -61,6 +61,58 @@ class DaemonApiTests(unittest.TestCase):
                 self.assertEqual(health["status"], "ok")
                 maintenance = json.loads(urlopen(base + "/api/maintenance", timeout=3).read().decode("utf-8"))
                 duplicate = [item for item in maintenance["suggestions"] if item["type"] == "duplicate_merge"][0]
+                lifecycle = json.loads(urlopen(base + "/api/lifecycle/summary", timeout=3).read().decode("utf-8"))
+                self.assertEqual(lifecycle["status"], "ok")
+                self.assertGreaterEqual(lifecycle["state_counts"]["active"], 1)
+                self.assertTrue(lifecycle["retrieval_policy"]["raw_memory_preserved"])
+                compaction_candidates = json.loads(urlopen(base + "/api/lifecycle/compaction-candidates", timeout=3).read().decode("utf-8"))
+                self.assertEqual(compaction_candidates["status"], "ok")
+                self.assertGreaterEqual(compaction_candidates["count"], 1)
+                preview_req = Request(
+                    base + f"/api/compaction/clusters/{compaction_candidates['candidates'][0]['cluster_id']}/run?project=DysonSpherain",
+                    data=json.dumps({"mode": "deterministic", "verifier": "unit"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                preview = json.loads(urlopen(preview_req, timeout=3).read().decode("utf-8"))
+                self.assertEqual(preview["status"], "ok")
+                self.assertIn("canonical_content", preview["result"])
+                verify_req = Request(
+                    base + f"/api/compaction/results/{preview['result']['result_id']}/verify?project=DysonSpherain",
+                    data=json.dumps({}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                verified = json.loads(urlopen(verify_req, timeout=3).read().decode("utf-8"))
+                self.assertTrue(verified["result"]["verifier_passed"])
+                reject_req = Request(
+                    base + f"/api/compaction/results/{preview['result']['result_id']}/reject?project=DysonSpherain",
+                    data=json.dumps({"reason": "daemon preview path tested"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                rejected = json.loads(urlopen(reject_req, timeout=3).read().decode("utf-8"))
+                self.assertEqual(rejected["result"]["status"], "rejected")
+                compact_req = Request(
+                    base + "/api/lifecycle/compact?project=DysonSpherain",
+                    data=json.dumps({"cluster_id": compaction_candidates["candidates"][0]["cluster_id"], "mode": "deterministic", "verifier": "unit"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                compacted = json.loads(urlopen(compact_req, timeout=3).read().decode("utf-8"))
+                self.assertEqual(compacted["status"], "ok")
+                self.assertTrue(compacted["raw_memory_preserved"])
+                inspect_req = Request(
+                    base + "/api/retrieval/inspect?project=DysonSpherain",
+                    data=json.dumps({"query": "daemon maintenance", "limit": 5}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                inspected = json.loads(urlopen(inspect_req, timeout=3).read().decode("utf-8"))
+                self.assertIn("stage_counts", inspected)
+                self.assertIn("score_breakdown", inspected)
+                lifecycle_audit = json.loads(urlopen(base + "/api/lifecycle/audit", timeout=3).read().decode("utf-8"))
+                self.assertEqual(lifecycle_audit["events"][0]["event_type"], "memory_compaction_committed")
                 rebuild_req = Request(
                     base + "/api/index/rebuild?project=DysonSpherain",
                     data=json.dumps({}).encode("utf-8"),
@@ -110,6 +162,15 @@ class DaemonApiTests(unittest.TestCase):
                 )
                 updated = json.loads(urlopen(post, timeout=3).read().decode("utf-8"))
                 self.assertEqual(updated["config"]["context_budget"], 777)
+                settings_post = Request(
+                    base + "/api/settings",
+                    data=json.dumps({"llm_config": {"external_llm_enabled": False, "local_only": True}, "compaction_config": {"mode": "deterministic", "max_input_memories": 12}}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                settings = json.loads(urlopen(settings_post, timeout=3).read().decode("utf-8"))
+                self.assertFalse(settings["config"]["llm_config"]["external_llm_enabled"])
+                self.assertEqual(settings["config"]["compaction_config"]["max_input_memories"], 12)
                 queue = Request(
                     base + "/api/runtime/scheduler/enqueue",
                     data=json.dumps({"trigger": "artifact_updated"}).encode("utf-8"),

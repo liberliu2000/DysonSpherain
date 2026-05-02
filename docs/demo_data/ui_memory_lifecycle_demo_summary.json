@@ -1,0 +1,66 @@
+{
+  "status": "ok",
+  "demo_run_id": "ui_demo_finish_20260501_161845",
+  "generated_at": "2026-05-01T16:18:45.908102+00:00",
+  "token_windows": {
+    "1h": {
+      "days": 0,
+      "hours": 1,
+      "event_count": 2,
+      "baseline_context_tokens": 7800,
+      "injected_tokens": 2700,
+      "estimated_saved_tokens": 5100,
+      "saving_ratio": 0.6538461538461539
+    },
+    "24h": {
+      "days": 1,
+      "event_count": 5,
+      "baseline_context_tokens": 19739,
+      "injected_tokens": 6928,
+      "estimated_saved_tokens": 12811,
+      "saving_ratio": 0.6490197071786818
+    },
+    "7d": {
+      "days": 7,
+      "event_count": 8,
+      "baseline_context_tokens": 42039,
+      "injected_tokens": 15428,
+      "estimated_saved_tokens": 26611,
+      "saving_ratio": 0.6330074454673041
+    },
+    "30d": {
+      "days": 30,
+      "event_count": 8,
+      "baseline_context_tokens": 42039,
+      "injected_tokens": 15428,
+      "estimated_saved_tokens": 26611,
+      "saving_ratio": 0.6330074454673041
+    }
+  },
+  "llm_prompt_token_economy": {
+    "days": 30,
+    "event_count": 8,
+    "baseline_context_tokens": 42039,
+    "injected_tokens": 15428,
+    "estimated_saved_tokens": 26611,
+    "saving_ratio": 0.6330074454673041
+  },
+  "token_event_count": 8,
+  "lifecycle_state_counts": {
+    "active": 7,
+    "archived": 1,
+    "compacted": 3,
+    "contradicted": 1,
+    "deprecated": 1,
+    "stable": 3,
+    "superseded": 1,
+    "canonical": 1
+  },
+  "lifecycle_total_memories": 17,
+  "lifecycle_eligible_memories": 11,
+  "compaction_candidate_count": 2,
+  "committed_canonical_id": "cap_0c461413a9db10eecbda",
+  "external_llm_result_id": "cmp_fd89dc5144cd9b08bb16",
+  "external_llm_used": true,
+  "external_llm_warnings": []
+}

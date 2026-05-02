@@ -1,0 +1,20 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='760' height='320' viewBox='0 0 760 320'>
+<rect width='760' height='320' rx='24' fill='#E0E5EC'/>
+<text x='36' y='46' fill='#3D4852' font-family='Arial' font-size='22' font-weight='700'>DysonSpherain Token Savings Demo</text>
+<rect x='60' y='214' width='92' height='36' rx='14' fill='#6C63FF' opacity='0.88'/>
+<text x='60' y='278' fill='#3D4852' font-family='Arial' font-size='16' font-weight='700'>1h</text>
+<text x='60' y='202' fill='#3D4852' font-family='Arial' font-size='14'>5,100 tokens</text>
+<text x='60' y='224' fill='#6B7280' font-family='Arial' font-size='12'>65.4% saved</text>
+<rect x='230' y='159' width='92' height='91' rx='14' fill='#6C63FF' opacity='0.88'/>
+<text x='230' y='278' fill='#3D4852' font-family='Arial' font-size='16' font-weight='700'>24h</text>
+<text x='230' y='147' fill='#3D4852' font-family='Arial' font-size='14'>12,811 tokens</text>
+<text x='230' y='169' fill='#6B7280' font-family='Arial' font-size='12'>64.9% saved</text>
+<rect x='400' y='60' width='92' height='190' rx='14' fill='#6C63FF' opacity='0.88'/>
+<text x='400' y='278' fill='#3D4852' font-family='Arial' font-size='16' font-weight='700'>7d</text>
+<text x='400' y='72' fill='#3D4852' font-family='Arial' font-size='14'>26,611 tokens</text>
+<text x='400' y='92' fill='#6B7280' font-family='Arial' font-size='12'>63.3% saved</text>
+<rect x='570' y='60' width='92' height='190' rx='14' fill='#6C63FF' opacity='0.88'/>
+<text x='570' y='278' fill='#3D4852' font-family='Arial' font-size='16' font-weight='700'>total</text>
+<text x='570' y='72' fill='#3D4852' font-family='Arial' font-size='14'>26,611 tokens</text>
+<text x='570' y='92' fill='#6B7280' font-family='Arial' font-size='12'>63.3% saved</text>
+</svg>

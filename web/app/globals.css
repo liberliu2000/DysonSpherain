@@ -455,6 +455,10 @@ a {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.lifecycle-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .route-item,
 .timeline-item {
   display: grid;
@@ -568,6 +572,96 @@ button.route-item {
 .result-box {
   color: var(--foreground);
   font-weight: 700;
+}
+
+.result-box p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-weight: 600;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.retrieval-grid,
+.settings-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.settings-toggles {
+  margin-top: 18px;
+}
+
+.memory-tools {
+  margin-bottom: 18px;
+}
+
+.confirm-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 0;
+  color: var(--foreground);
+  font-weight: 800;
+}
+
+.confirm-row input {
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.memory-table {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 12px;
+  overflow-x: auto;
+}
+
+.memory-table-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.5fr) 110px 180px 80px;
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+  min-height: 44px;
+  border: 0;
+  border-radius: 16px;
+  background: transparent;
+  color: var(--foreground);
+  font-weight: 700;
+  text-align: left;
+}
+
+.memory-table-row:not(.memory-table-head) {
+  cursor: pointer;
+  padding: 8px 10px;
+}
+
+.memory-table-head {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.memory-detail summary {
+  cursor: pointer;
+}
+
+.memory-detail pre {
+  max-height: 320px;
+  overflow: auto;
+  padding: 14px;
+  border-radius: 16px;
+  color: var(--foreground);
+  white-space: pre-wrap;
+  word-break: break-word;
+  box-shadow: var(--shadow-inset-small);
 }
 
 .trend-chart {
@@ -695,6 +789,15 @@ button.route-item {
   gap: 10px;
 }
 
+.filter-row {
+  margin-bottom: 18px;
+}
+
+.filter-row button {
+  border: 0;
+  cursor: pointer;
+}
+
 .editor-actions {
   display: flex;
   flex-wrap: wrap;
@@ -775,7 +878,13 @@ button.route-item {
 
   .metric-grid,
   .artifact-grid,
+  .lifecycle-grid,
   .route-list.two-column {
+    grid-template-columns: 1fr;
+  }
+
+  .retrieval-grid,
+  .settings-grid {
     grid-template-columns: 1fr;
   }
 

@@ -7,6 +7,8 @@ import shutil
 import sqlite3
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from fnmatch import fnmatch
 from math import sqrt
 from dataclasses import asdict, dataclass, field
@@ -14,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from dysonspherain.memory_runtime.config import load_runtime_config
 from dysonspherain.utils.token_counter import TokenCounter
 from sphere_cli.security import redact_payload, redact_secrets
 from sphere_cli.utils import stable_content_hash
@@ -53,6 +56,19 @@ ALL_PROBES = {
     "artifact_probe",
     "code_ref_probe",
     "recent_state_probe",
+}
+DEFAULT_ELIGIBLE_STATES = {"active", "stable"}
+DEFAULT_EXCLUDED_STATES = {"superseded", "deprecated", "contradicted", "compacted", "archived", "reverted"}
+DEFAULT_LIFECYCLE_MULTIPLIERS = {
+    "active": 1.0,
+    "stable": 1.1,
+    "canonical": 1.15,
+    "compacted": 0.45,
+    "superseded": 0.05,
+    "deprecated": 0.05,
+    "contradicted": 0.02,
+    "archived": 0.1,
+    "reverted": 0.05,
 }
 
 
@@ -548,6 +564,12 @@ def _cosine(a: list[float], b: list[float]) -> float:
         return 0.0
     n = min(len(a), len(b))
     return sum(a[i] * b[i] for i in range(n))
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / max(1, len(a | b))
 
 
 def _embedding_config_path(base_dir: Path) -> Path:
@@ -1110,6 +1132,36 @@ def mark_reverted(base_dir: Path, capsule_id: str, by_capsule_id: str, reason: s
     return _mark_relation(base_dir, capsule_id=capsule_id, by_capsule_id=by_capsule_id, state="reverted", relation_type="reverted_by", reason=reason)
 
 
+def get_supersession_chain(base_dir: Path, capsule_id: str, *, project_id: str | None = None, limit: int = 20) -> dict[str, Any]:
+    chain: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    current_id: str | None = capsule_id
+    for _ in range(max(1, min(int(limit or 20), 100))):
+        if not current_id or current_id in seen:
+            break
+        seen.add(current_id)
+        cap = get_capsule(base_dir, current_id, project_id=project_id)
+        chain.append(cap)
+        next_ids = cap.get("superseded_by") or []
+        if not next_ids:
+            with connect(base_dir) as conn:
+                row = conn.execute(
+                    "SELECT source_capsule_id FROM capsule_relations WHERE target_capsule_id = ? AND relation_type = 'supersedes' ORDER BY created_at DESC LIMIT 1",
+                    (current_id,),
+                ).fetchone()
+            next_ids = [row["source_capsule_id"]] if row else []
+        current_id = next_ids[0] if next_ids else None
+    return {"status": "ok", "capsule_id": capsule_id, "chain": chain, "active_successor": chain[-1] if chain and chain[-1].get("validity_state") in DEFAULT_ELIGIBLE_STATES else None}
+
+
+def get_active_successor(base_dir: Path, capsule_id: str, *, project_id: str | None = None) -> dict[str, Any]:
+    chain = get_supersession_chain(base_dir, capsule_id, project_id=project_id)
+    for cap in reversed(chain["chain"]):
+        if cap.get("validity_state") in DEFAULT_ELIGIBLE_STATES:
+            return {"status": "ok", "capsule_id": capsule_id, "successor": cap}
+    return {"status": "ok", "capsule_id": capsule_id, "successor": None}
+
+
 def get_active_evidence(base_dir: Path, *, project_id: str, task_id: str | None = None, limit: int = 100) -> dict[str, Any]:
     init_product_store(base_dir, project_id=project_id)
     where = ["project_id = ?", "archived = 0", "validity_state = 'active'"]
@@ -1247,7 +1299,7 @@ def _where(alias: str, *, include_invalid: bool) -> tuple[list[str], list[Any]]:
     prefix = f"{alias}." if alias else ""
     where = [f"{prefix}project_id = ?", f"{prefix}archived = 0"]
     if not include_invalid:
-        where.append(f"{prefix}validity_state = 'active'")
+        where.append(f"{prefix}validity_state IN ('active', 'stable')")
     return where, []
 
 
@@ -1365,7 +1417,7 @@ def _query_product_vector_index(
         collection = _chroma_collection(base_dir, create=False)
         where: dict[str, Any] = {"project_id": project_id}
         if not include_invalid:
-            where = {"$and": [{"project_id": project_id}, {"validity_state": "active"}]}
+            where = {"$and": [{"project_id": project_id}, {"validity_state": {"$in": ["active", "stable"]}}]}
         result = collection.query(query_embeddings=[qvec], n_results=max(1, limit), where=where, include=["metadatas", "documents", "distances"])
     except Exception:
         return None
@@ -1401,7 +1453,7 @@ def _run_dense_probe(base_dir: Path, conn: sqlite3.Connection, *, project_id: st
         qvec = _local_embedding(query)
     where = ["c.project_id = ?", "c.archived = 0"]
     if not include_invalid:
-        where.append("c.validity_state = 'active'")
+        where.append("c.validity_state IN ('active', 'stable')")
     rows = conn.execute(
         f"""
         SELECT c.*, e.backend AS embedding_backend, e.metadata_json AS embedding_metadata_json
@@ -1456,9 +1508,89 @@ class ProbeRun:
     reason: str | None = None
 
 
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _recency_score(timestamp: str | None, *, half_life_days: float = 30.0) -> float:
+    parsed = _parse_iso(timestamp)
+    if parsed is None:
+        return 0.5
+    age_days = max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds() / 86400.0)
+    return round(0.5 ** (age_days / max(1.0, half_life_days)), 6)
+
+
+def _runtime_scoring_settings(base_dir: Path) -> tuple[dict[str, Any], dict[str, float]]:
+    try:
+        from dysonspherain.memory_runtime.config import load_runtime_config
+
+        config = load_runtime_config(base_dir).to_dict()
+    except Exception:
+        config = {}
+    scoring = dict(config.get("scoring_config") or {})
+    multipliers = {**DEFAULT_LIFECYCLE_MULTIPLIERS, **{str(k): float(v) for k, v in dict(config.get("lifecycle_multipliers") or {}).items()}}
+    return scoring, multipliers
+
+
+def _lifecycle_score_breakdown(item: dict[str, Any], *, scoring: dict[str, Any] | None = None, lifecycle_multipliers: dict[str, float] | None = None) -> dict[str, Any]:
+    cap = item.get("capsule") or {}
+    state = _memory_lifecycle_state(cap)
+    meta = cap.get("metadata") or {}
+    scoring = scoring or {}
+    lifecycle_multipliers = lifecycle_multipliers or DEFAULT_LIFECYCLE_MULTIPLIERS
+    base_score = float(item.get("score") or item.get("admission_score") or 0.0)
+    recency = _recency_score(cap.get("timestamp"), half_life_days=float(scoring.get("recency_half_life_days") or meta.get("recency_half_life_days") or 30.0))
+    importance = float(cap.get("importance") or 0.5)
+    confidence = float(cap.get("confidence") or 0.7)
+    access_count = int(meta.get("access_count") or 0)
+    access_score = min(1.0, access_count / 20.0)
+    redundancy = float(meta.get("redundancy_score") or 0.0)
+    lifecycle_multiplier = float(lifecycle_multipliers.get(state, 1.0))
+    validity_multiplier = 1.0 if cap.get("validity_state") in DEFAULT_ELIGIBLE_STATES else 0.0
+    recency_weight = float(scoring.get("recency_weight") or 0.12)
+    importance_weight = float(scoring.get("importance_weight") or 0.18)
+    confidence_weight = float(scoring.get("confidence_weight") or 0.1)
+    access_weight = float(scoring.get("access_weight") or 0.05)
+    redundancy_weight = float(scoring.get("redundancy_weight") or 0.2)
+    final = (
+        base_score * validity_multiplier * lifecycle_multiplier
+        + recency_weight * recency
+        + importance_weight * importance
+        + confidence_weight * confidence
+        + access_weight * access_score
+        - redundancy_weight * redundancy
+    )
+    return {
+        "base_score": round(base_score, 6),
+        "validity_multiplier": validity_multiplier,
+        "lifecycle_state": state,
+        "lifecycle_multiplier": lifecycle_multiplier,
+        "recency_score": recency,
+        "importance_score": round(importance, 6),
+        "confidence_score": round(confidence, 6),
+        "access_score": round(access_score, 6),
+        "redundancy_score": round(redundancy, 6),
+        "weights": {
+            "recency": recency_weight,
+            "importance": importance_weight,
+            "confidence": confidence_weight,
+            "access": access_weight,
+            "redundancy": redundancy_weight,
+        },
+        "final_memory_score": round(max(0.0, final), 6),
+    }
+
+
 class CandidateAdmissionAuditor:
-    def __init__(self, *, gold_ids: list[str] | None = None) -> None:
+    def __init__(self, *, gold_ids: list[str] | None = None, scoring: dict[str, Any] | None = None, lifecycle_multipliers: dict[str, float] | None = None) -> None:
         self.gold_ids = _list(gold_ids)
+        self.scoring = scoring or {}
+        self.lifecycle_multipliers = lifecycle_multipliers or DEFAULT_LIFECYCLE_MULTIPLIERS
 
     def merge(
         self,
@@ -1489,8 +1621,10 @@ class CandidateAdmissionAuditor:
             support_bonus = min(0.2, 0.04 * max(0, len(item.get("source_probes") or []) - 1))
             recency_bonus = 0.03 if "recent_state_probe" in item.get("source_probes", []) else 0.0
             item["admission_score"] = round(float(item.get("score") or 0.0) + support_bonus + recency_bonus, 6)
+            item["score_breakdown"] = _lifecycle_score_breakdown(item, scoring=self.scoring, lifecycle_multipliers=self.lifecycle_multipliers)
+            item["final_memory_score"] = item["score_breakdown"]["final_memory_score"]
             item["raw_features"]["source_probes"] = item.get("source_probes", [])
-        reranked = sorted(admitted, key=lambda item: (float(item.get("admission_score") or 0.0), item["capsule"].get("timestamp") or ""), reverse=True)
+        reranked = sorted(admitted, key=lambda item: (float(item.get("final_memory_score") or 0.0), item["capsule"].get("timestamp") or ""), reverse=True)
         final = reranked[:limit]
         final_ids = [item["capsule_id"] for item in final]
         admitted_ids = [item["capsule_id"] for item in admitted]
@@ -1541,6 +1675,7 @@ def search(
     init_product_store(base_dir, project_id=project_id)
     route = classify_route(query, task_type=task_type)
     limit = max(1, min(int(limit or 10), 100))
+    scoring, lifecycle_multipliers = _runtime_scoring_settings(base_dir)
     probe_runs: list[ProbeRun] = []
     filtered_by_id: dict[str, dict[str, Any]] = {}
     with connect(base_dir) as conn:
@@ -1570,19 +1705,31 @@ def search(
                     include_invalid=True,
                 )
                 for item in invalid:
-                    if item["capsule"]["validity_state"] != "active":
+                    if item["capsule"]["validity_state"] not in DEFAULT_ELIGIBLE_STATES:
                         item = dict(item)
                         item["probe"] = "validity_filter"
                         item["reason"] = f"excluded because validity_state={item['capsule']['validity_state']} from {probe}"
                         filtered_by_id[item["capsule_id"]] = item
         if not include_invalid and not filtered_by_id:
             invalid_rows = conn.execute(
-                "SELECT * FROM evidence_capsules WHERE project_id = ? AND archived = 0 AND validity_state != 'active' ORDER BY timestamp DESC LIMIT ?",
+                "SELECT * FROM evidence_capsules WHERE project_id = ? AND archived = 0 AND validity_state NOT IN ('active', 'stable') ORDER BY timestamp DESC LIMIT ?",
                 (project_id, limit),
             ).fetchall()
             filtered_by_id.update({row["id"]: _candidate(row, idx, "validity_filter", f"excluded because validity_state={row['validity_state']}") for idx, row in enumerate(invalid_rows)})
-    audit = CandidateAdmissionAuditor(gold_ids=gold_ids).merge(probe_runs, limit=limit, filtered=list(filtered_by_id.values()))
+    audit = CandidateAdmissionAuditor(gold_ids=gold_ids, scoring=scoring, lifecycle_multipliers=lifecycle_multipliers).merge(probe_runs, limit=limit, filtered=list(filtered_by_id.values()))
     candidates = audit["final_candidates"]
+    if candidates:
+        with connect(base_dir) as conn:
+            for item in candidates:
+                cap = item.get("capsule") or {}
+                meta = dict(cap.get("metadata") or {})
+                meta["access_count"] = int(meta.get("access_count") or 0) + 1
+                meta["last_accessed_at"] = now_iso()
+                conn.execute(
+                    "UPDATE evidence_capsules SET metadata_json = ?, updated_at = ? WHERE id = ? AND project_id = ?",
+                    (_json(redact_payload(meta)), now_iso(), item["capsule_id"], project_id),
+                )
+            conn.commit()
     trace = _write_retrieval_trace(base_dir, project_id=project_id, query=query, route=route, audit=audit)
     return {"status": "ok", "project_id": project_id, "query": query, **route, "count": len(candidates), "candidates": candidates, "retrieval_trace": trace}
 
@@ -1665,6 +1812,76 @@ def retrieve(
     if not show_audit:
         result.pop("retrieval_trace", None)
     return result
+
+
+def inspect_retrieval(base_dir: Path, *, project_id: str, query: str, limit: int = 10, max_tokens: int = 2000, task_type: str | None = None) -> dict[str, Any]:
+    result = retrieve(
+        base_dir,
+        project_id=project_id,
+        query=query,
+        limit=limit,
+        show_audit=True,
+        context_pack=True,
+        max_tokens=max_tokens,
+        task_type=task_type,
+        include_debug_trace=True,
+    )
+    trace = result.get("retrieval_trace") or {}
+    admitted = trace.get("admitted_candidates") or []
+    reranked = trace.get("reranked_candidates") or []
+    final = trace.get("final_candidates") or []
+    excluded = trace.get("filtered_candidates") or []
+    stage_counts = {
+        "initial_candidates": sum(int(item.get("count") or 0) for item in (trace.get("probe_results") or {}).values()),
+        "after_lifecycle_filtering": len(admitted),
+        "after_scoring": len(reranked),
+        "after_token_budget_packing": len(final),
+        "excluded_evidence": len(excluded),
+    }
+    selected = []
+    score_breakdown: dict[str, dict[str, Any]] = {}
+    scoring, lifecycle_multipliers = _runtime_scoring_settings(base_dir)
+    for idx, item in enumerate(final, start=1):
+        cap = item.get("capsule") or {}
+        breakdown = item.get("score_breakdown") or _lifecycle_score_breakdown(item, scoring=scoring, lifecycle_multipliers=lifecycle_multipliers)
+        score_breakdown[item["capsule_id"]] = breakdown
+        selected.append(
+            {
+                "rank": idx,
+                "memory_id": item["capsule_id"],
+                "title": cap.get("title"),
+                "preview": cap.get("summary") or cap.get("raw_text") or "",
+                "lifecycle_state": _memory_lifecycle_state(cap),
+                "final_score": breakdown.get("final_memory_score"),
+                "why_selected": item.get("reason"),
+                "source_trace": {"probes": item.get("source_probes") or [], "raw_features": item.get("raw_features") or {}},
+            }
+        )
+    excluded_evidence = [
+        {
+            "memory_id": item.get("capsule_id"),
+            "reason": item.get("reason") or "excluded",
+            "stage": item.get("probe") or "lifecycle_filter",
+            "score_before": item.get("score"),
+            "score_after": 0.0,
+            "replaced_by": (item.get("capsule") or {}).get("metadata", {}).get("compacted_into") if isinstance(item.get("capsule"), dict) else None,
+        }
+        for item in excluded
+    ]
+    context_pack = result.get("context_pack") or {}
+    return {
+        "status": "ok",
+        "project_id": project_id,
+        "query": query,
+        "initial_candidate_count": stage_counts["initial_candidates"],
+        "stage_counts": stage_counts,
+        "final_context": selected,
+        "excluded_evidence": excluded_evidence,
+        "score_breakdown": score_breakdown,
+        "token_estimate": context_pack.get("token_estimate") or context_pack.get("estimated_tokens") or 0,
+        "context_pack": context_pack,
+        "retrieval_trace": trace,
+    }
 
 
 def _section(title: str, items: list[str]) -> str:
@@ -2221,6 +2438,665 @@ def maintenance_suggestions(base_dir: Path, *, project_id: str, limit: int = 100
         conn.commit()
     open_count = sum(1 for item in enriched if item["status"] == "open")
     return {"status": "ok", "project_id": project_id, "count": len(enriched), "open_count": open_count, "suggestions": enriched[:limit]}
+
+
+def _memory_lifecycle_state(capsule: dict[str, Any]) -> str:
+    state = str(capsule.get("validity_state") or "active")
+    if capsule.get("evidence_type") == "canonical" or capsule.get("metadata", {}).get("memory_type") == "canonical":
+        return "canonical"
+    return state
+
+
+def _token_estimate(text: str | None) -> int:
+    if not text:
+        return 0
+    return max(1, int(len(text.split()) * 1.35) + int(len(text) / 18))
+
+
+def _normalized_memory_text(capsule: dict[str, Any]) -> str:
+    text = " ".join(str(capsule.get(key) or "") for key in ("title", "summary", "raw_text"))
+    text = re.sub(r"\s+", " ", text.lower()).strip()
+    return text
+
+
+def _memory_similarity(a: dict[str, Any], b: dict[str, Any]) -> dict[str, float]:
+    text_a = _normalized_memory_text(a)
+    text_b = _normalized_memory_text(b)
+    terms_a = set(_extract_terms(text_a))
+    terms_b = set(_extract_terms(text_b))
+    lexical = _jaccard(terms_a, terms_b)
+    semantic = _cosine(_local_embedding(text_a), _local_embedding(text_b))
+    return {"lexical": round(lexical, 6), "semantic": round(semantic, 6), "combined": round(max(lexical, semantic), 6)}
+
+
+def _compact_capsule_summary(capsules: list[dict[str, Any]], *, max_chars: int = 1200) -> str:
+    seen: set[str] = set()
+    parts: list[str] = []
+    for cap in capsules:
+        text = str(cap.get("summary") or cap.get("raw_text") or cap.get("title") or "").strip()
+        if not text:
+            continue
+        normalized = re.sub(r"\s+", " ", text.lower()).strip()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        parts.append(text)
+        if sum(len(part) for part in parts) >= max_chars:
+            break
+    merged = " ".join(parts)
+    return merged[:max_chars].rstrip()
+
+
+def memory_lifecycle_summary(base_dir: Path, *, project_id: str, limit: int = 80) -> dict[str, Any]:
+    init_product_store(base_dir, project_id=project_id)
+    limit = max(1, min(int(limit or 80), 300))
+    with connect(base_dir) as conn:
+        state_rows = conn.execute(
+            """
+            SELECT validity_state, COUNT(*) AS n
+            FROM evidence_capsules
+            WHERE project_id = ? AND archived = 0
+            GROUP BY validity_state
+            """,
+            (project_id,),
+        ).fetchall()
+        canonical_count = conn.execute(
+            """
+            SELECT COUNT(*) FROM evidence_capsules
+            WHERE project_id = ? AND archived = 0
+              AND (evidence_type = 'canonical' OR json_extract(metadata_json, '$.memory_type') = 'canonical')
+            """,
+            (project_id,),
+        ).fetchone()[0]
+        rows = conn.execute(
+            "SELECT * FROM evidence_capsules WHERE project_id = ? AND archived = 0 ORDER BY updated_at DESC, timestamp DESC LIMIT ?",
+            (project_id, limit),
+        ).fetchall()
+        recent_traces = conn.execute(
+            "SELECT trace_id, query, route, payload_json, created_at FROM retrieval_traces WHERE project_id = ? ORDER BY created_at DESC LIMIT 6",
+            (project_id,),
+        ).fetchall()
+    state_counts = {str(row["validity_state"]): int(row["n"]) for row in state_rows}
+    state_counts["canonical"] = int(canonical_count)
+    records = []
+    for row in rows:
+        cap = _capsule_from_row(row)
+        text = str(cap.get("summary") or cap.get("raw_text") or "")
+        meta = dict(cap.get("metadata") or {})
+        records.append(
+            {
+                "id": cap["id"],
+                "title": cap.get("title") or cap["id"],
+                "content": text,
+                "summary": cap.get("summary"),
+                "scope": cap.get("source_type") or cap.get("evidence_type") or "memory",
+                "state": _memory_lifecycle_state(cap),
+                "validity_state": cap.get("validity_state"),
+                "memory_type": meta.get("memory_type") or cap.get("evidence_type") or "raw",
+                "updated_at": cap.get("updated_at") or cap.get("timestamp"),
+                "created_at": cap.get("created_at"),
+                "tags": cap.get("tags") or [],
+                "importance": cap.get("importance"),
+                "confidence": cap.get("confidence"),
+                "source_ids": meta.get("source_ids") or cap.get("parent_ids") or [],
+                "compacted_into": meta.get("compacted_into"),
+                "token_estimate": meta.get("token_estimate") or _token_estimate(text),
+                "why": meta.get("lifecycle_reason") or f"{cap.get('validity_state', 'active')} memory from {cap.get('source_type', 'unknown source')}",
+            }
+        )
+    trace_items = []
+    for row in recent_traces:
+        payload = json.loads(row["payload_json"] or "{}")
+        excluded = payload.get("filtered_candidates") or payload.get("filtered") or []
+        trace_items.append(
+            {
+                "trace_id": row["trace_id"],
+                "query": row["query"],
+                "route": row["route"],
+                "created_at": row["created_at"],
+                "selected_count": len(payload.get("final_candidates") or []),
+                "excluded_count": len(excluded),
+                "excluded": excluded[:8],
+            }
+        )
+    total = sum(count for state, count in state_counts.items() if state != "canonical")
+    eligible = state_counts.get("active", 0) + state_counts.get("stable", 0) + state_counts.get("canonical", 0)
+    return {
+        "status": "ok",
+        "project_id": project_id,
+        "state_counts": state_counts,
+        "total_memories": total,
+        "eligible_memories": eligible,
+        "records": records,
+        "recent_retrieval_traces": trace_items,
+        "retrieval_policy": {
+            "eligible_by_default": ["active", "stable", "canonical"],
+            "excluded_by_default": ["superseded", "deprecated", "contradicted", "compacted", "archived"],
+            "raw_memory_preserved": True,
+        },
+    }
+
+
+def find_compaction_candidates(base_dir: Path, *, project_id: str, limit: int = 12, near_duplicate_threshold: float = 0.9, min_cluster_size: int = 2) -> dict[str, Any]:
+    init_product_store(base_dir, project_id=project_id)
+    limit = max(1, min(int(limit or 12), 50))
+    min_cluster_size = max(2, min(int(min_cluster_size or 2), 20))
+    near_duplicate_threshold = max(0.1, min(float(near_duplicate_threshold or 0.9), 1.0))
+    with connect(base_dir) as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM evidence_capsules
+            WHERE project_id = ? AND archived = 0 AND validity_state IN ('active', 'stable')
+            ORDER BY updated_at DESC, timestamp DESC
+            LIMIT 500
+            """,
+            (project_id,),
+        ).fetchall()
+    capsules: list[dict[str, Any]] = []
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        cap = _capsule_from_row(row)
+        if cap.get("evidence_type") == "canonical":
+            continue
+        normalized = _normalized_memory_text(cap)
+        if not normalized:
+            continue
+        capsules.append(cap)
+        key = stable_content_hash(normalized)[:16]
+        buckets.setdefault(key, []).append(cap)
+    candidates = []
+    used_exact_ids: set[str] = set()
+    for key, caps in buckets.items():
+        if len(caps) < 2:
+            continue
+        used_exact_ids.update(cap["id"] for cap in caps)
+        original_tokens = sum(_token_estimate(str(cap.get("summary") or cap.get("raw_text") or "")) for cap in caps)
+        canonical_summary = _compact_capsule_summary(caps)
+        compacted_tokens = _token_estimate(canonical_summary)
+        candidates.append(
+            {
+                "cluster_id": key,
+                "mode": "deterministic",
+                "reason": "exact normalized duplicate or repeated summary",
+                "memory_ids": [cap["id"] for cap in caps],
+                "memory_count": len(caps),
+                "avg_similarity": 1.0,
+                "redundancy_score": 1.0,
+                "importance_score": round(sum(float(cap.get("importance") or 0.5) for cap in caps) / len(caps), 6),
+                "source_titles": [cap.get("title") or cap["id"] for cap in caps[:6]],
+                "original_token_estimate": original_tokens,
+                "compacted_token_estimate": compacted_tokens,
+                "estimated_saved_tokens": max(0, original_tokens - compacted_tokens),
+                "estimated_token_savings_ratio": (max(0, original_tokens - compacted_tokens) / original_tokens) if original_tokens else 0.0,
+                "suggested_action": "compact_local",
+                "canonical_preview": canonical_summary,
+            }
+        )
+    clustered_ids: set[str] = set(used_exact_ids)
+    for seed in capsules:
+        if seed["id"] in clustered_ids:
+            continue
+        cluster = [seed]
+        similarities: list[float] = []
+        for other in capsules:
+            if other["id"] == seed["id"] or other["id"] in clustered_ids:
+                continue
+            scores = _memory_similarity(seed, other)
+            if scores["combined"] >= near_duplicate_threshold:
+                cluster.append(other)
+                similarities.append(scores["combined"])
+        if len(cluster) < min_cluster_size:
+            continue
+        clustered_ids.update(cap["id"] for cap in cluster)
+        original_tokens = sum(_token_estimate(str(cap.get("summary") or cap.get("raw_text") or "")) for cap in cluster)
+        canonical_summary = _compact_capsule_summary(cluster)
+        compacted_tokens = _token_estimate(canonical_summary)
+        avg_similarity = sum(similarities) / len(similarities) if similarities else near_duplicate_threshold
+        cluster_id = "near_" + stable_content_hash(_json([project_id, [cap["id"] for cap in cluster], round(avg_similarity, 4)]))[:16]
+        candidates.append(
+            {
+                "cluster_id": cluster_id,
+                "mode": "local_semantic",
+                "reason": "local lexical/embedding near-duplicate cluster",
+                "memory_ids": [cap["id"] for cap in cluster],
+                "memory_count": len(cluster),
+                "avg_similarity": round(avg_similarity, 6),
+                "redundancy_score": round(avg_similarity, 6),
+                "importance_score": round(sum(float(cap.get("importance") or 0.5) for cap in cluster) / len(cluster), 6),
+                "source_titles": [cap.get("title") or cap["id"] for cap in cluster[:6]],
+                "original_token_estimate": original_tokens,
+                "compacted_token_estimate": compacted_tokens,
+                "estimated_saved_tokens": max(0, original_tokens - compacted_tokens),
+                "estimated_token_savings_ratio": (max(0, original_tokens - compacted_tokens) / original_tokens) if original_tokens else 0.0,
+                "suggested_action": "compact_local",
+                "canonical_preview": canonical_summary,
+            }
+        )
+    candidates.sort(key=lambda item: (item["estimated_saved_tokens"], item["memory_count"]), reverse=True)
+    return {"status": "ok", "project_id": project_id, "count": len(candidates[:limit]), "candidates": candidates[:limit]}
+
+
+def verify_compaction_result(base_dir: Path, *, project_id: str, canonical_content: str, source_ids: list[str], max_output_tokens: int = 1200) -> dict[str, Any]:
+    warnings: list[str] = []
+    source_ids = [str(item) for item in source_ids if str(item)]
+    if not source_ids:
+        warnings.append("source_ids_empty")
+    if not canonical_content.strip():
+        warnings.append("canonical_content_empty")
+    if _token_estimate(canonical_content) > max_output_tokens:
+        warnings.append("output_exceeds_max_tokens")
+    preserved = True
+    missing: list[str] = []
+    for source_id in source_ids:
+        try:
+            get_capsule(base_dir, source_id, project_id=project_id)
+        except KeyError:
+            preserved = False
+            missing.append(source_id)
+    if missing:
+        warnings.append("source_memory_missing")
+    if source_ids and canonical_content:
+        source_terms: set[str] = set()
+        for source_id in source_ids:
+            try:
+                cap = get_capsule(base_dir, source_id, project_id=project_id)
+            except KeyError:
+                continue
+            source_terms.update(_extract_terms(str(cap.get("summary") or cap.get("raw_text") or cap.get("title") or "")))
+        unsupported = [term for term in _extract_terms(canonical_content) if source_terms and term not in source_terms]
+        if len(unsupported) > max(12, len(source_terms) // 2):
+            warnings.append("canonical_content_may_contain_unsupported_terms")
+    passed = not warnings and preserved
+    return {"status": "ok", "verifier_passed": passed, "warnings": warnings, "raw_memory_preserved": preserved, "missing_source_ids": missing}
+
+
+def _compaction_results_dir(base_dir: Path) -> Path:
+    path = product_root(base_dir) / "compaction_results"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _compaction_result_path(base_dir: Path, result_id: str) -> Path:
+    return _compaction_results_dir(base_dir) / f"{result_id}.json"
+
+
+def _write_compaction_result(base_dir: Path, result: dict[str, Any]) -> dict[str, Any]:
+    path = _compaction_result_path(base_dir, result["result_id"])
+    path.write_text(_json(result) + "\n", encoding="utf-8")
+    return result
+
+
+def _external_llm_compaction_gate(base_dir: Path, *, confirm_external_call: bool = False) -> tuple[bool, list[str], dict[str, Any]]:
+    config = load_runtime_config(base_dir).to_dict()
+    llm_config = dict(config.get("llm_config") or {})
+    compaction_config = dict(config.get("compaction_config") or {})
+    privacy_config = dict(config.get("privacy_config") or {})
+    warnings: list[str] = []
+    if not llm_config.get("external_llm_enabled"):
+        warnings.append("external_llm_disabled_by_user")
+    if not compaction_config.get("external_llm_compaction_enabled"):
+        warnings.append("external_llm_compaction_disabled_by_user")
+    if llm_config.get("local_only", True) or privacy_config.get("local_only", False):
+        warnings.append("local_only_mode_prevents_external_llm")
+    if privacy_config.get("require_external_call_confirmation", True) and not confirm_external_call:
+        warnings.append("external_call_confirmation_required")
+    provider = str(llm_config.get("provider") or "auto")
+    if provider in {"", "auto", "codex", "claude", "disabled"}:
+        warnings.append("external_provider_not_configured")
+    if provider in {"openai_compatible", "custom"} and not llm_config.get("api_base_url"):
+        warnings.append("external_api_base_url_missing")
+    if provider in {"openai_compatible", "custom"} and not llm_config.get("api_key"):
+        warnings.append("external_api_key_missing")
+    return not warnings, warnings, config
+
+
+def _safe_external_source_texts(capsules: list[dict[str, Any]], *, allow_raw: bool, max_input_tokens: int) -> list[dict[str, str]]:
+    remaining = max(256, int(max_input_tokens or 12000))
+    payload: list[dict[str, str]] = []
+    for cap in capsules:
+        text = str((cap.get("raw_text") if allow_raw else None) or cap.get("summary") or cap.get("title") or "")
+        text = redact_secrets(text)
+        estimated = _token_estimate(text)
+        if estimated > remaining:
+            words = text.split()
+            text = " ".join(words[: max(40, remaining)])
+            estimated = _token_estimate(text)
+        if text:
+            payload.append({"id": str(cap["id"]), "title": str(cap.get("title") or cap["id"]), "text": text})
+            remaining -= estimated
+        if remaining <= 0:
+            break
+    return payload
+
+
+def _run_external_llm_compaction(
+    base_dir: Path,
+    *,
+    capsules: list[dict[str, Any]],
+    confirm_external_call: bool,
+) -> tuple[str | None, list[str], dict[str, Any] | None]:
+    allowed, warnings, config = _external_llm_compaction_gate(base_dir, confirm_external_call=confirm_external_call)
+    if not allowed:
+        return None, warnings, None
+    llm_config = dict(config.get("llm_config") or {})
+    compaction_config = dict(config.get("compaction_config") or {})
+    allow_raw = bool(llm_config.get("allow_raw_memory_external"))
+    source_payload = _safe_external_source_texts(
+        capsules,
+        allow_raw=allow_raw,
+        max_input_tokens=int(compaction_config.get("max_input_tokens") or 12000),
+    )
+    if not source_payload:
+        return None, ["external_payload_empty"], None
+    base_url = str(llm_config.get("api_base_url") or "").rstrip("/")
+    if not base_url.endswith("/chat/completions"):
+        base_url = base_url.rstrip("/") + "/v1/chat/completions"
+    body = {
+        "model": str(llm_config.get("model") or "gpt-4o-mini"),
+        "messages": [
+            {
+                "role": "system",
+                "content": "Create one concise canonical memory from the source memories. Preserve source IDs, avoid new facts, and return only the canonical memory text.",
+            },
+            {"role": "user", "content": _json({"sources": source_payload, "raw_memory_included": allow_raw})},
+        ],
+        "temperature": 0,
+        "max_tokens": int(compaction_config.get("max_output_tokens") or 700),
+    }
+    request = urllib.request.Request(
+        base_url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {llm_config.get('api_key')}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=float(compaction_config.get("timeout_seconds") or 45)) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        return None, [f"external_llm_call_failed:{type(exc).__name__}"], {"provider": llm_config.get("provider"), "api_base_url": base_url}
+    content = ""
+    try:
+        content = str(payload["choices"][0]["message"]["content"]).strip()
+    except (KeyError, IndexError, TypeError):
+        return None, ["external_llm_response_invalid"], {"provider": llm_config.get("provider"), "api_base_url": base_url}
+    return content or None, [], {"provider": llm_config.get("provider"), "model": llm_config.get("model"), "raw_memory_included": allow_raw, "source_count": len(source_payload)}
+
+
+def get_compaction_result(base_dir: Path, *, result_id: str, project_id: str | None = None) -> dict[str, Any]:
+    path = _compaction_result_path(base_dir, result_id)
+    if not path.exists():
+        raise KeyError(result_id)
+    result = json.loads(path.read_text(encoding="utf-8"))
+    if project_id and result.get("project_id") != project_id:
+        raise KeyError(result_id)
+    return {"status": "ok", "result": result}
+
+
+def create_compaction_result(
+    base_dir: Path,
+    *,
+    project_id: str,
+    cluster_id: str | None = None,
+    memory_ids: list[str] | None = None,
+    mode: str = "deterministic",
+    verifier: str = "system",
+    confirm_external_call: bool = False,
+) -> dict[str, Any]:
+    if mode not in {"deterministic", "local_semantic", "hybrid", "llm"}:
+        raise ValueError("mode must be deterministic, local_semantic, hybrid, or llm")
+    selected_ids = [str(item) for item in memory_ids or [] if str(item)]
+    cluster: dict[str, Any] | None = None
+    if not selected_ids and cluster_id:
+        candidates = find_compaction_candidates(base_dir, project_id=project_id, limit=50)["candidates"]
+        cluster = next((item for item in candidates if item["cluster_id"] == cluster_id), None)
+        if cluster is None:
+            candidates = find_compaction_candidates(base_dir, project_id=project_id, limit=50, near_duplicate_threshold=0.4)["candidates"]
+            cluster = next((item for item in candidates if item["cluster_id"] == cluster_id), None)
+        selected_ids = list(cluster.get("memory_ids") or []) if cluster else []
+    if len(selected_ids) < 2:
+        raise ValueError("compaction requires at least two source memories")
+    capsules = [get_capsule(base_dir, capsule_id, project_id=project_id) for capsule_id in selected_ids]
+    source_ids = [cap["id"] for cap in capsules]
+    summary = _compact_capsule_summary(capsules)
+    warnings: list[str] = []
+    external_metadata: dict[str, Any] | None = None
+    if mode in {"hybrid", "llm"}:
+        external_summary, external_warnings, external_metadata = _run_external_llm_compaction(
+            base_dir,
+            capsules=capsules,
+            confirm_external_call=confirm_external_call,
+        )
+        warnings.extend(external_warnings)
+        if external_summary:
+            summary = external_summary
+    source_tokens = sum(_token_estimate(str(cap.get("summary") or cap.get("raw_text") or "")) for cap in capsules)
+    compacted_tokens = _token_estimate(summary)
+    verification = verify_compaction_result(base_dir, project_id=project_id, canonical_content=summary, source_ids=source_ids)
+    warnings.extend(verification["warnings"])
+    result_id = "cmp_" + stable_content_hash(_json([project_id, cluster_id, source_ids, summary, mode, now_iso()]))[:20]
+    result = {
+        "result_id": result_id,
+        "cluster_id": cluster_id or "manual_" + stable_content_hash(_json(source_ids))[:16],
+        "project_id": project_id,
+        "canonical_content": summary,
+        "source_ids": source_ids,
+        "method": mode,
+        "confidence_score": min(float(cap.get("confidence") or 0.7) for cap in capsules),
+        "estimated_token_savings_ratio": (max(0, source_tokens - compacted_tokens) / source_tokens) if source_tokens else 0.0,
+        "source_token_estimate": source_tokens,
+        "compacted_token_estimate": compacted_tokens,
+        "estimated_saved_tokens": max(0, source_tokens - compacted_tokens),
+        "warnings": warnings,
+        "verifier_passed": verification["verifier_passed"],
+        "verification": verification,
+        "external_llm": external_metadata,
+        "external_llm_attempted": mode in {"hybrid", "llm"},
+        "created_by": verifier,
+        "created_at": now_iso(),
+        "status": "verified" if verification["verifier_passed"] and not warnings else "needs_review",
+        "source_titles": [cap.get("title") or cap["id"] for cap in capsules],
+    }
+    _write_compaction_result(base_dir, result)
+    with connect(base_dir) as conn:
+        event_id = "evt_" + stable_content_hash(_json([project_id, result_id, "memory_compaction_started", now_iso()]))[:20]
+        conn.execute(
+            "INSERT OR REPLACE INTO runtime_events(event_id, project_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            (event_id, project_id, "memory_compaction_started", _json({"result_id": result_id, "cluster_id": result["cluster_id"], "source_ids": source_ids, "mode": mode}), now_iso()),
+        )
+        conn.commit()
+    return {"status": "ok", "result": result}
+
+
+def verify_compaction_result_record(base_dir: Path, *, result_id: str, project_id: str | None = None) -> dict[str, Any]:
+    result = get_compaction_result(base_dir, result_id=result_id, project_id=project_id)["result"]
+    verification = verify_compaction_result(base_dir, project_id=str(result["project_id"]), canonical_content=str(result.get("canonical_content") or ""), source_ids=[str(item) for item in result.get("source_ids") or []])
+    result["verification"] = verification
+    result["warnings"] = verification["warnings"]
+    result["verifier_passed"] = verification["verifier_passed"]
+    result["status"] = "verified" if verification["verifier_passed"] else "needs_review"
+    _write_compaction_result(base_dir, result)
+    with connect(base_dir) as conn:
+        event_id = "evt_" + stable_content_hash(_json([result["project_id"], result_id, "memory_compaction_verified", now_iso()]))[:20]
+        conn.execute(
+            "INSERT OR REPLACE INTO runtime_events(event_id, project_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            (event_id, result["project_id"], "memory_compaction_verified", _json({"result_id": result_id, "verification": verification}), now_iso()),
+        )
+        conn.commit()
+    return {"status": "ok", "result": result}
+
+
+def commit_compaction_result(base_dir: Path, *, result_id: str, project_id: str | None = None, allow_needs_review: bool = False) -> dict[str, Any]:
+    result = get_compaction_result(base_dir, result_id=result_id, project_id=project_id)["result"]
+    if result.get("status") == "committed":
+        return {"status": "ok", "result": result, "canonical_id": result.get("canonical_id")}
+    if not result.get("verifier_passed") and not allow_needs_review:
+        return {"status": "needs_review", "result": result, "verification": result.get("verification")}
+    source_ids = [str(item) for item in result.get("source_ids") or []]
+    capsules = [get_capsule(base_dir, capsule_id, project_id=str(result["project_id"])) for capsule_id in source_ids]
+    title = str(capsules[0].get("title") or "Compacted memory")
+    metadata = {
+        "memory_type": "canonical",
+        "source_ids": source_ids,
+        "compaction": {
+            "result_id": result_id,
+            "mode": result.get("method"),
+            "strategy": "reviewable_compaction_result",
+            "source_count": len(source_ids),
+            "source_token_estimate": result.get("source_token_estimate"),
+            "compacted_token_estimate": result.get("compacted_token_estimate"),
+            "estimated_saved_tokens": result.get("estimated_saved_tokens"),
+            "raw_memory_preserved": True,
+            "verifier_passed": bool(result.get("verifier_passed")),
+            "warnings": result.get("warnings") or [],
+            "created_at": now_iso(),
+        },
+        "lifecycle_reason": "canonical memory committed from reviewable compaction result; raw sources preserved and traceable",
+    }
+    remembered = remember(
+        base_dir,
+        project_id=str(result["project_id"]),
+        text=str(result.get("canonical_content") or ""),
+        evidence_type="canonical",
+        source_type=f"{result.get('method') or 'local'}_compactor",
+        title=f"Canonical: {title[:80]}",
+        summary=str(result.get("canonical_content") or "")[:320],
+        validity_state="active",
+        tags=sorted({tag for cap in capsules for tag in cap.get("tags", [])} | {"canonical", "compacted"}),
+        metadata=metadata,
+    )
+    canonical_id = remembered["capsule_id"]
+    with connect(base_dir) as conn:
+        for cap in capsules:
+            cap_meta = dict(cap.get("metadata") or {})
+            cap_meta["compacted_into"] = canonical_id
+            cap_meta["lifecycle_reason"] = "included in canonical compacted memory; raw text preserved"
+            cap_meta.setdefault("compaction_source", {})["canonical_id"] = canonical_id
+            parent_ids = _append_unique(cap.get("parent_ids") or [], canonical_id)
+            related_ids = _append_unique(cap.get("related_ids") or [], canonical_id)
+            conn.execute(
+                """
+                UPDATE evidence_capsules
+                SET validity_state = 'compacted', parent_ids_json = ?, related_ids_json = ?, metadata_json = ?, updated_at = ?
+                WHERE id = ? AND project_id = ?
+                """,
+                (_json(parent_ids), _json(related_ids), _json(redact_payload(cap_meta)), now_iso(), cap["id"], result["project_id"]),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO capsule_relations(relation_id, source_capsule_id, target_capsule_id, relation_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                ("rel_" + stable_content_hash(_json([cap["id"], canonical_id, "compacted_into"]))[:20], cap["id"], canonical_id, "compacted_into", "raw memory preserved as source for canonical compacted memory", now_iso()),
+            )
+        event_id = "evt_" + stable_content_hash(_json([result["project_id"], canonical_id, source_ids, now_iso()]))[:20]
+        conn.execute(
+            "INSERT OR REPLACE INTO runtime_events(event_id, project_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            (event_id, result["project_id"], "memory_compaction_committed", _json({"result_id": result_id, "canonical_id": canonical_id, "source_ids": source_ids, "mode": result.get("method"), "raw_memory_preserved": True}), now_iso()),
+        )
+        conn.commit()
+    result["status"] = "committed"
+    result["canonical_id"] = canonical_id
+    result["committed_at"] = now_iso()
+    _write_compaction_result(base_dir, result)
+    return {"status": "ok", "canonical_id": canonical_id, "result": result, "capsule": get_capsule(base_dir, canonical_id, project_id=str(result["project_id"]))}
+
+
+def reject_compaction_result(base_dir: Path, *, result_id: str, project_id: str | None = None, reason: str | None = None) -> dict[str, Any]:
+    result = get_compaction_result(base_dir, result_id=result_id, project_id=project_id)["result"]
+    result["status"] = "rejected"
+    result["rejected_at"] = now_iso()
+    result["reject_reason"] = reason or ""
+    _write_compaction_result(base_dir, result)
+    with connect(base_dir) as conn:
+        event_id = "evt_" + stable_content_hash(_json([result["project_id"], result_id, "memory_compaction_rejected", now_iso()]))[:20]
+        conn.execute(
+            "INSERT OR REPLACE INTO runtime_events(event_id, project_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            (event_id, result["project_id"], "memory_compaction_rejected", _json({"result_id": result_id, "reason": reason or ""}), now_iso()),
+        )
+        conn.commit()
+    return {"status": "ok", "result": result}
+
+
+def run_deterministic_compaction(base_dir: Path, *, project_id: str, cluster_id: str | None = None, memory_ids: list[str] | None = None, mode: str = "deterministic", verifier: str = "system") -> dict[str, Any]:
+    created = create_compaction_result(base_dir, project_id=project_id, cluster_id=cluster_id, memory_ids=memory_ids, mode=mode, verifier=verifier)
+    result = created["result"]
+    if not result.get("verifier_passed"):
+        return {"status": "needs_review", "project_id": project_id, "source_ids": result.get("source_ids") or [], "mode": mode, "verification": result.get("verification"), "canonical_preview": result.get("canonical_content"), "result": result}
+    committed = commit_compaction_result(base_dir, result_id=result["result_id"], project_id=project_id)
+    return {
+        "status": committed["status"],
+        "project_id": project_id,
+        "canonical_id": committed.get("canonical_id"),
+        "source_ids": result.get("source_ids") or [],
+        "mode": mode,
+        "raw_memory_preserved": True,
+        "source_token_estimate": result.get("source_token_estimate"),
+        "compacted_token_estimate": result.get("compacted_token_estimate"),
+        "estimated_saved_tokens": result.get("estimated_saved_tokens"),
+        "verification": result.get("verification"),
+        "result": committed.get("result"),
+        "capsule": committed.get("capsule"),
+    }
+
+
+def lifecycle_audit(base_dir: Path, *, project_id: str, limit: int = 30) -> dict[str, Any]:
+    init_product_store(base_dir, project_id=project_id)
+    with connect(base_dir) as conn:
+        rows = conn.execute(
+            "SELECT event_id, event_type, payload_json, created_at FROM runtime_events WHERE project_id = ? AND event_type LIKE 'memory_%' ORDER BY created_at DESC LIMIT ?",
+            (project_id, max(1, min(int(limit or 30), 100))),
+        ).fetchall()
+    return {
+        "status": "ok",
+        "project_id": project_id,
+        "events": [{"event_id": row["event_id"], "event_type": row["event_type"], "created_at": row["created_at"], "payload": json.loads(row["payload_json"] or "{}")} for row in rows],
+    }
+
+
+def migrate_lifecycle_metadata(base_dir: Path, *, project_id: str | None = None, backup: bool = True) -> dict[str, Any]:
+    init_product_store(base_dir, project_id=project_id or "default")
+    db_path = product_db_path(base_dir)
+    backup_path: str | None = None
+    if backup and db_path.exists():
+        target = db_path.with_suffix(f".lifecycle-backup-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.sqlite3")
+        shutil.copy2(db_path, target)
+        backup_path = str(target)
+    where = ["archived = 0"]
+    params: list[Any] = []
+    if project_id:
+        where.append("project_id = ?")
+        params.append(project_id)
+    migrated = 0
+    with connect(base_dir) as conn:
+        rows = conn.execute(f"SELECT * FROM evidence_capsules WHERE {' AND '.join(where)}", params).fetchall()
+        for row in rows:
+            cap = _capsule_from_row(row)
+            meta = dict(cap.get("metadata") or {})
+            text = str(cap.get("summary") or cap.get("raw_text") or cap.get("title") or "")
+            changed = False
+            defaults = {
+                "memory_type": cap.get("evidence_type") or "raw",
+                "content_hash": stable_content_hash(text),
+                "normalized_hash": stable_content_hash(_normalized_memory_text(cap)),
+                "token_estimate": _token_estimate(text),
+                "access_count": int(meta.get("access_count") or 0),
+                "last_accessed_at": meta.get("last_accessed_at"),
+                "created_by": meta.get("created_by") or "migration",
+            }
+            for key, value in defaults.items():
+                if key not in meta:
+                    meta[key] = value
+                    changed = True
+            if cap.get("validity_state") not in DEFAULT_ELIGIBLE_STATES | DEFAULT_EXCLUDED_STATES:
+                conn.execute("UPDATE evidence_capsules SET validity_state = 'active' WHERE id = ?", (cap["id"],))
+                changed = True
+            if changed:
+                conn.execute("UPDATE evidence_capsules SET metadata_json = ?, updated_at = ? WHERE id = ?", (_json(redact_payload(meta)), now_iso(), cap["id"]))
+                migrated += 1
+        event_id = "evt_" + stable_content_hash(_json([project_id, migrated, backup_path, now_iso()]))[:20]
+        conn.execute(
+            "INSERT OR REPLACE INTO runtime_events(event_id, project_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            (event_id, project_id or "all", "memory_lifecycle_migrated", _json({"migrated_count": migrated, "backup_path": backup_path}), now_iso()),
+        )
+        conn.commit()
+    return {"status": "ok", "project_id": project_id, "migrated_count": migrated, "backup_path": backup_path}
 
 
 def get_maintenance_suggestion(base_dir: Path, *, project_id: str, suggestion_id: str) -> dict[str, Any]:

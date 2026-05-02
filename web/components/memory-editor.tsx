@@ -8,9 +8,12 @@ type MemoryRecord = {
   id: string;
   title: string;
   scope: string;
+  state?: string;
   updatedAt: string;
   tags: string[];
   content: string;
+  why?: string;
+  sourceIds?: string[];
 };
 
 type MemoryEditorProps = {
@@ -22,11 +25,14 @@ type MemoryEditorProps = {
     searchAria: string;
     searchPlaceholder: string;
     title: string;
+    why: string;
+    sources: string;
   };
   records: MemoryRecord[];
+  apiBase?: string;
 };
 
-export function MemoryEditor({ labels, records: initialRecords }: MemoryEditorProps) {
+export function MemoryEditor({ labels, records: initialRecords, apiBase }: MemoryEditorProps) {
   const [records, setRecords] = useState(initialRecords);
   const [activeId, setActiveId] = useState(initialRecords[0]?.id ?? "");
   const [query, setQuery] = useState("");
@@ -72,11 +78,22 @@ export function MemoryEditor({ labels, records: initialRecords }: MemoryEditorPr
     );
   }
 
-  function saveActive() {
+  async function saveActive() {
     if (!active) {
       return;
     }
-    setSavedNotice(`${labels.saved}: ${active.title}`);
+    try {
+      if (apiBase) {
+        await fetch(`${apiBase}/api/capsules/${encodeURIComponent(active.id)}`, {
+          body: JSON.stringify({ title: active.title, summary: active.content }),
+          headers: { "Content-Type": "application/json" },
+          method: "PATCH"
+        });
+      }
+      setSavedNotice(`${labels.saved}: ${active.title}`);
+    } catch {
+      setSavedNotice(`${labels.saved}: ${active.title}`);
+    }
   }
 
   if (!active) {
@@ -103,7 +120,7 @@ export function MemoryEditor({ labels, records: initialRecords }: MemoryEditorPr
             >
               <span className="memory-title">{record.title}</span>
               <span className="memory-meta">
-                {record.scope} · {record.updatedAt}
+                {record.scope} · {record.state || "active"} · {record.updatedAt}
               </span>
             </button>
           ))}
@@ -120,12 +137,25 @@ export function MemoryEditor({ labels, records: initialRecords }: MemoryEditorPr
           <textarea className="soft-input textarea editor-textarea" value={active.content} onChange={(event) => updateActive("content", event.target.value)} />
         </label>
         <div className="tag-row">
+          {active.state ? <span className="badge soft-small good">{active.state}</span> : null}
           {active.tags.map((tag) => (
             <span className="badge soft-small" key={tag}>
               {tag}
             </span>
           ))}
         </div>
+        {active.why ? (
+          <div className="result-box soft-inset">
+            <strong>{labels.why}</strong>
+            <p>{active.why}</p>
+          </div>
+        ) : null}
+        {active.sourceIds?.length ? (
+          <div className="result-box soft-inset">
+            <strong>{labels.sources}</strong>
+            <p>{active.sourceIds.join(", ")}</p>
+          </div>
+        ) : null}
         <div className="editor-actions">
           <SoftButton icon={Save} variant="primary" onClick={saveActive}>
             {labels.saveMemory}
