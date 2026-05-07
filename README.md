@@ -19,6 +19,7 @@
 
 ---
 
+
 ## Why DysonSpherain?
 
 Modern coding agents are powerful, but they forget the exact things that matter most: project decisions, failed attempts, benchmark results, constraints, errors, and why a previous implementation was rejected.
@@ -30,6 +31,21 @@ Instead of writing prompts like this every day:
 > “Remember the previous benchmark regression, the config issue, the fallback embedding problem, the latest test command, the current design constraint, and the reason we changed retrieval fusion...”
 
 You ask the agent to continue — and DysonSpherain provides the evidence.
+
+---
+
+## Current benchmark snapshot
+
+Formal validation status: **passed** across 4 full benchmarks and 5,870 questions, with `fallback_in_use=false` and no `local_hash` fallback in the published scores.
+
+| Benchmark | Product signal | Questions | Primary score | Candidate R@100 | Final NDCG@10 | Status |
+|---|---|---:|---:|---:|---:|---|
+| LongMemEval | Long-horizon recall | 500 | Recall@10 `0.9920` | `1.0000` | `0.9259` | passed |
+| LoCoMo | Multi-session memory | 1,986 | Recall_frac@10 `0.9070` | `1.0000` | `0.7533` | passed |
+| KnowMe | User-profile memory | 1,010 | Recall_frac@10 `0.5972` | `0.7266` | `0.5051` | passed |
+| CloneMem | Code-clone memory | 2,374 | Recall_frac@10 `0.0954` | `0.3442` | `0.0752` | passed |
+
+Source: [formal protocol validation](reports/formal_protocol_validation.md) and [final formal summary](reports/final_formal_protocol_summary_20260429.md). Current runs are reported as `non_comparable` to older runs because the formal protocol only computes deltas for matching config, dataset, embedding, fallback status, and route policy.
 
 ---
 
