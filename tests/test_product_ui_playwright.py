@@ -74,7 +74,7 @@ class ProductUiPlaywrightTests(unittest.TestCase):
                     page.get_by_role("button", name="Evidence Search").click()
                     page.locator("#productQuery").fill("dense evidence")
                     page.locator("#evidenceSearch").get_by_role("button", name="Search").click()
-                    page.locator("#productDetail").wait_for()
+                    page.wait_for_function("document.querySelector('#productDetail').innerText.includes('dense_probe')")
                     self.assertIn("dense_probe", page.locator("#productDetail").inner_text())
 
                     page.get_by_role("button", name="Context Composer").click()

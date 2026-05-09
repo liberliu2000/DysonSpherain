@@ -140,7 +140,7 @@ class EmbeddingProvider:
         fail_fast: bool = False,
     ) -> None:
         self.fallback_allowed = embedding_fallback_allowed()
-        self.effective_fail_fast = bool(fail_fast or not self.fallback_allowed)
+        self.effective_fail_fast = bool(fail_fast and not self.fallback_allowed)
         self.primary = SentenceTransformerEmbedder(preferred_model_name, fail_fast=self.effective_fail_fast)
         self.fallback = LocalHashEmbedder(fallback_dim)
         self.active = self.primary if self.primary.is_available else self.fallback

@@ -1960,6 +1960,9 @@ def _filter_and_budget_sections(sections: list[dict[str, Any]], *, selected: lis
             if used + cost <= max(1, limit):
                 kept.append(str(item))
                 used += cost
+            elif not kept and cost <= max(1, limit) + max(1, int(limit * 0.1)):
+                kept.append(str(item))
+                used += cost
             else:
                 dropped += 1
         next_section = dict(section)
