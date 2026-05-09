@@ -22,9 +22,9 @@ class NpmWrapperTests(unittest.TestCase):
 
     def test_wrapper_help_and_mcp_smoke(self) -> None:
         help_proc = subprocess.run(["node", str(WRAPPER), "--help"], text=True, capture_output=True, check=True)
-        self.assertIn("npx dysonspherain-memory install", help_proc.stdout)
-        self.assertIn("npm install -g dysonspherain-memory", help_proc.stdout)
-        self.assertIn("npx dysonspherain-memory plugin install", help_proc.stdout)
+        self.assertIn("npx @liberliu/dysonspherain-memory install", help_proc.stdout)
+        self.assertIn("npm install -g @liberliu/dysonspherain-memory", help_proc.stdout)
+        self.assertIn("npx @liberliu/dysonspherain-memory plugin install", help_proc.stdout)
         smoke = subprocess.run(["node", str(WRAPPER), "mcp-smoke", "--python", sys.executable], text=True, capture_output=True, check=True)
         self.assertIn("dyson_search_memory", smoke.stdout)
 

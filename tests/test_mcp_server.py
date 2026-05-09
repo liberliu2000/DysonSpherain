@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import anyio
 import json
 import os
 import sys
@@ -262,6 +261,10 @@ class McpServerTests(unittest.TestCase):
     def test_mcp_sdk_stdio_server_lists_tools_and_calls_tool(self) -> None:
         if not mcp_sdk_available():
             self.skipTest("mcp SDK is not installed")
+        try:
+            import anyio
+        except ModuleNotFoundError:
+            self.skipTest("anyio is not installed")
 
         async def run_client() -> None:
             from mcp import ClientSession, StdioServerParameters
