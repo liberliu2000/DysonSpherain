@@ -108,7 +108,7 @@ http://127.0.0.1:37777
 ### Option B — run from a cloned checkout
 
 ```bash
-git clone <your-dysonspherain-repo-url>
+git https://github.com/liberliu2000/DysonSpherain.git
 cd DysonSpherain
 node bin/dysonspherain-memory.js install --project .
 node bin/dysonspherain-memory.js doctor --project .
@@ -120,7 +120,7 @@ The wrapper prepares a package-local Python runtime when needed. Use `--no-boots
 ### Option C — Python development install
 
 ```bash
-git clone <your-dysonspherain-repo-url>
+git https://github.com/liberliu2000/DysonSpherain.git
 cd DysonSpherain
 python3 -m venv .venv
 source .venv/bin/activate
